@@ -1,0 +1,651 @@
+#!/bin/tcsh -f
+
+##Use this script to create a volume in template space prior to coregisteration to subject T1 scans
+##Author:  Eric Woodcock, Wayne State University School of Medicine
+##Version:  5.0
+##Most Recent Modification:  Sept, 2016
+##Questions/Problems:  ewoodcoc@med.wayne.edu
+##Inputs:  All inputs are prompted. User enters: voxel size, location, rotations, scanner orientation
+
+
+## Housekeeping
+
+set program = $0
+set program = $program:t 
+set machine = `echo $HOST | cut -d. -f1`
+set testing_dir = `pwd`
+set template_file = "template.nii.gz"
+set voi_loc_file = "${testing_dir}/volume_locations.txt"
+set AWK	= "gawk"
+	
+if ( -e $testing_dir/avp_config.txt ) then
+	set avp_config_file = "$testing_dir/avp_config.txt"
+	set new_bc = `$AWK '/new_bc:/ { print $2 }' $avp_config_file`
+	set matlab_dir = `$AWK '/matlab_dir:/ { print $2 }' $avp_config_file`
+else
+	set new_bc = "${testing_dir}/new_bc"
+	set matlab_dir = "/home/dicom/gdrive/scripts"
+endif
+	
+
+unset DONE
+
+while (! ${?DONE} )
+
+#User inputs
+echo -n "Input Voxel Center Coordinates (comma separated) [MNI pixel; X (L-R), Y (A-P), Z (V-D)]:"
+set coord = $<
+
+set coord_x_px = `echo $coord | cut -d, -f1` 
+set coord_y_px = `echo $coord | cut -d, -f2` 
+set coord_z_px = `echo $coord | cut -d, -f3` 
+
+
+if ( "$coord" == "") then
+ echo ""
+ echo "Need to input voxel center coordinates in MNI template space: X, Y, Z"
+ echo ""
+ echo " e.g. 150, 50, 30"
+ echo ""
+ exit
+endif
+
+echo "Is this correct (y/n)?  ($coord_x_px, $coord_y_px, $coord_z_px) MNI pixel space"
+
+set input = $<
+
+	switch ( $input )
+		case y:           
+	breaksw
+	case n:
+		echo ""
+		echo "Start Over..."
+		echo ""
+		end
+	default:
+	endsw
+
+echo -n "Input Voxel Dimensions (comma separated) [mm; X (L-R), Y (A-P), Z (F-H)]:"
+set size = $<
+
+set size_x_mm = `echo $size | cut -d, -f1` 
+set size_y_mm = `echo $size | cut -d, -f2` 
+set size_z_mm = `echo $size | cut -d, -f3` 
+
+
+
+if ( "$size" == "") then
+ echo ""
+ echo "Need to input voxel dimensions (mm):  X (L-R), Y (A-P), Z (F-H)."
+ echo ""
+ echo " e.g. 10, 20, 10"
+ echo "Start Over..."
+ echo ""
+ exit
+endif
+
+echo "Is this correct (y/n)?  $size_x_mm, $size_y_mm, $size_z_mm mm"
+
+set input = $<
+
+	switch ( $input )
+		case y:           
+	breaksw
+	case n:
+		echo ""
+		echo "Ending..."
+		echo ""
+		end
+	default:
+	endsw
+
+	
+echo -n "Input Rotation Angles (comma separated) [<45 deg; T>C (about x-axis), T>S (about y-axis), Rotation (about z-axis)]:"
+set rotation = $<
+
+set rot_x = `echo $rotation | cut -d, -f1` 
+set rot_y = `echo $rotation | cut -d, -f2` 
+set rot_z = `echo $rotation | cut -d, -f3` 
+
+
+if ( "$rotation" == "") then
+ echo ""
+ echo "Need to input rotation angles [deg, <45]:  T>C (about x-axis), T>S (about y-axis), Rotation (about z-axis)." 
+ echo ""
+ echo " e.g. 20, 15, 35"
+ echo "Start Over..."
+ echo ""
+ exit
+endif
+
+echo "Is this correct (y/n)?  Rotations: $rot_x, $rot_y, $rot_z (deg)"
+
+set input = $<
+
+	switch ( $input )
+		case y:           
+	breaksw
+	case n:
+		echo ""
+		echo "Ending..."
+		echo ""
+		end
+	default:
+	endsw
+
+
+echo -n "Input voxel name and 3-letter study code (comma separated) (e.g. dlpfc,LEA):"
+set voxel = $<
+
+set voxel_name = `echo $voxel | cut -d, -f1` 
+set study_name = `echo $voxel | cut -d, -f2` 
+
+
+
+if ( "$voxel" == "") then
+ echo ""
+ echo "Provide voxel name and associated 3-letter study code (comma separated) for future use:" 
+ echo ""
+ echo " e.g. dlpfc,NSS"
+ echo "Start Over..."
+ echo ""
+ exit
+endif
+
+
+echo "Is this correct (y/n)?  $voxel_name $study_name"
+
+set input = $<
+
+	switch ( $input )
+		case y:
+	breaksw
+	case n:
+		echo ""
+		echo "Start Over..."
+		echo ""
+		end
+	default:
+	endsw
+	
+	
+	
+echo -n "Input 3-letter image orientation (comma separated; e.g. 'L,A,S'):"
+set mri_orient1 = $<
+
+set orient_lr = `echo ${mri_orient1} | cut -d, -f1` 
+set orient_ap = `echo ${mri_orient1} | cut -d, -f2` 
+set orient_si = `echo ${mri_orient1} | cut -d, -f3` 
+set mri_orient = `echo ${orient_lr}${orient_ap}${orient_si}` 
+
+if ( "${mri_orient1}" == "" ) then
+ echo ""
+ echo "Need to enter the 3-letter image orientation..." 
+ echo ""
+ echo " e.g. 'L,A,S'"
+ echo "Start Over..."
+ echo ""
+ exit
+endif
+
+
+if ( $mri_orient1 == "L,A,S" || $mri_orient1 == "L,P,S" || $mri_orient1 == "L,A,I" || $mri_orient1 == "L,P,I" || $mri_orient1 == "R,A,S" || $mri_orient1 == "R,P,S" || $mri_orient1 == "R,A,I" || $mri_orient1 == "R,P,I" ) then
+ echo ""
+ echo "Is this correct (y/n)?  $mri_orient1"
+
+set input = $<
+
+	switch ( $input )
+		case y:			
+	breaksw
+	case n:
+		echo ""
+		echo "Start Over..."
+		echo ""
+		end
+	default:
+	endsw
+else
+	echo "Must enter valid 3-letter image orientation (comma separated). Start Over..."
+	exit
+endif
+set DONE
+end;
+
+set timestamp1 = `date +%T`
+
+
+if ( -e ${testing_dir}/${study_name}_${mri_orient}_${template_file} ) then
+	echo "FOUND template file:  ${testing_dir}/${study_name}_${mri_orient}_${template_file}"
+	echo "Checking template file orientation..."
+	set orientation1 = `mri_info ${testing_dir}/${study_name}_${mri_orient}_${template_file} | $AWK '/Orientation/ {print $3}'`
+		if ( "$orientation1" == "${mri_orient}" ) then
+			echo "Orientation verified as ${mri_orient}"
+			set template_file = "${testing_dir}/${study_name}_${mri_orient}_${template_file}"
+			set template_check = "yes"
+		else
+			echo "Orientation will be converted to ${mri_orient}"
+			mri_convert -nt -it nii -ot nii ${testing_dir}/${study_name}_${mri_orient}_${template_file} ${testing_dir}/${study_name}_${mri_orient}_${template_file} --in_orientation $orientation1 --out_orientation ${mri_orient}
+			set template_file = "${testing_dir}/${study_name}_${mri_orient}_${template_file}"
+			set template_check = "yes"
+		endif
+else
+	if ( -e ${testing_dir}/${template_file} ) then
+		echo "FOUND template file:  ${testing_dir}/${template_file}"
+		echo "Checking template file orientation..."
+		set orientation2 = `mri_info ${testing_dir}/${template_file} | $AWK '/Orientation/ {print $3}'`
+		if ( "$orientation2" == "${mri_orient}" ) then
+			echo "Orientation verified as ${mri_orient}"
+			cp ${testing_dir}/${template_file} ${testing_dir}/${study_name}_${mri_orient}_${template_file}
+			set template_file = "${testing_dir}/${study_name}_${mri_orient}_${template_file}"
+			set template_check = "yes"
+		else
+			echo "Orientation will be converted to ${mri_orient}"
+			mri_convert -nt -it nii -ot nii ${testing_dir}/${template_file} ${testing_dir}/${study_name}_${mri_orient}_${template_file} --in_orientation $orientation2 --out_orientation ${mri_orient}
+			set template_file = "${testing_dir}/${study_name}_${mri_orient}_${template_file}"
+			set template_check = "yes"
+		endif
+	else
+	endif
+
+endif
+  
+if ( "$template_check" == "yes" ) then
+else
+	echo "Template file could not be found here:  ${testing_dir}/"
+	echo "Place high quality T1 nifti file aligned along AC-PC with same FOV as subject scans and name it 'template.nii.gz'"
+	echo "Exiting..."
+	exit
+endif
+
+
+#Get pixel dimensions  template_file
+set pixdimx = `fslsize ${template_file} | $AWK '/pixdim1/ { print $2 }'`
+set pixdimy = `fslsize ${template_file} | $AWK '/pixdim2/ { print $2 }'`
+set pixdimz = `fslsize ${template_file} | $AWK '/pixdim3/ { print $2 }'`
+
+
+mri_info ${template_file} > temp.txt
+
+#Get FOV dimensions in px from template_file
+set dim_x_px = `$AWK '/'dimensions:'/ {print $2}' temp.txt`
+set dim_y_px = `$AWK '/'dimensions:'/ {print $4}' temp.txt`
+set dim_z_px = `$AWK '/'dimensions:'/ {print $6}' temp.txt`
+
+#Get center of FOV in mm from template_file
+set ctr_x_mm = `$AWK '/'c_r'/ {print $14}' temp.txt`
+set ctr_y_mm = `$AWK '/'c_a'/ {print $13}' temp.txt`
+set ctr_z_mm = `$AWK '/'c_s'/ {print $13}' temp.txt`
+
+grep -n 0 temp.txt > temp1.txt
+
+#Find the zero value in template_file
+set zero_x_mm = `$AWK '/'30:'/ {print $5}' temp1.txt`
+set zero_y_mm = `$AWK '/'31:'/ {print $5}' temp1.txt`
+set zero_z_mm = `$AWK '/'32:'/ {print $5}' temp1.txt`
+
+set zero_x_mm = `printf "%s\n" 'scale = 3; ( ( '${zero_x_mm}' ) )' | ${new_bc}`
+set zero_y_mm = `printf "%s\n" 'scale = 3; ( ( '${zero_y_mm}' ) )' | ${new_bc}`
+set zero_z_mm = `printf "%s\n" 'scale = 3; ( ( '${zero_z_mm}' ) )' | ${new_bc}`
+
+#housekeeping
+rm -f temp.txt
+rm -f temp1.txt
+
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+path(path,'${matlab_dir}');
+center_fov_x = ( $dim_x_px / 2 );
+center_fov_y = ( $dim_y_px / 2 );
+center_fov_z = ($dim_z_px / 2 );
+center_fov = [ center_fov_x center_fov_y center_fov_z ];
+dlmwrite('temp_center_fov.txt',center_fov,'delimiter','\t','precision',3)
+size_x_px = $size_x_mm / $pixdimx;
+size_y_px = $size_y_mm / $pixdimy;
+size_z_px = $size_z_mm / $pixdimz;
+size_px = [ size_x_px size_y_px size_z_px ];
+dlmwrite('temp_size_px.txt',size_px,'delimiter','\t','precision',3)
+center_x_px = $coord_x_px - center_fov_x;
+center_y_px = $coord_y_px - center_fov_y;
+center_z_px = $coord_z_px - center_fov_z;
+trans_x_mm = center_x_px * $pixdimx;
+trans_y_mm = center_y_px * $pixdimy;
+trans_z_mm = center_z_px * $pixdimz;
+trans_mm = [ trans_x_mm trans_y_mm trans_z_mm ];
+dlmwrite('temp_trans_mm.txt',trans_mm,'delimiter','\t','precision',3)
+if ( (trans_x_mm - $zero_x_mm) > 0 ) 
+coord_x_mm = trans_x_mm * -1;
+else;
+coord_x_mm = trans_x_mm;
+end;
+if ( (trans_y_mm - $zero_y_mm) > 0 )
+coord_y_mm = trans_y_mm * -1;
+else;
+coord_y_mm = trans_y_mm;
+end;
+if ( (trans_z_mm - $zero_z_mm) > 0 )
+coord_z_mm = trans_z_mm * -1;
+else;
+coord_z_mm = trans_z_mm;
+end;
+coords = [ coord_x_mm coord_y_mm coord_z_mm ];
+dlmwrite('temp_coord.txt',coords,'delimiter','\t','precision',3)
+%Correction for Siemens Standard Space
+vol_coord_x_mm = (trans_x_mm * -1) + $ctr_x_mm;
+vol_coord_y_mm = trans_y_mm + $ctr_y_mm;
+vol_coord_z_mm = trans_z_mm + $ctr_z_mm;
+vol_coords = [ vol_coord_x_mm vol_coord_y_mm vol_coord_z_mm ];
+dlmwrite('temp_volcoord.txt',vol_coords,'delimiter','\t','precision',3)
+corner_x = center_fov_x - (size_x_px / 2);
+corner_y = center_fov_y - (size_y_px / 2);
+corner_z = center_fov_z - (size_z_px / 2);
+corners = [ corner_x corner_y corner_z ];
+dlmwrite('temp_corners.txt',corners,'delimiter','\t','precision',3)
+Rx = [ 1 0 0 ; 0 cosd($rot_x) sind($rot_x) ; 0 -sind($rot_x) cosd($rot_x) ];
+Ry = [ cosd($rot_y) 0 -sind($rot_y) ; 0 1 0 ; sind($rot_y) 0 cosd($rot_y) ];
+Rz = [ cosd($rot_z) sind($rot_z) 0 ; -sind($rot_z) cosd($rot_z) 0 ; 0 0 1 ];
+ROT = Rx * Ry * Rz;
+[t1, t2, t3] = GetEulerAngles(ROT);
+Y = [t1, t2, t3];
+YY = round2dp(rad2deg(Y),2);
+dlmwrite('temp_eul.txt',YY,'delimiter','\t','precision',2)
+dlmwrite('rotation.mat',ROT,'delimiter','\t','precision','%.4f')
+S = [1 1 1];
+R = [0 0 0];
+T = [ coord_x_mm coord_y_mm coord_z_mm ];
+filename = 'voi_2_ref.mat';
+makeFslXfmMatrix(T, R, S, filename);
+EOF
+
+
+#FOV center in pixels
+set center_fov_x = `$AWK '/''/ {print $1}' temp_center_fov.txt`
+set center_fov_y = `$AWK '/''/ {print $2}' temp_center_fov.txt`
+set center_fov_z = `$AWK '/''/ {print $3}' temp_center_fov.txt`
+rm -f temp_center_fov.txt
+
+#FOV center in pixels
+set center_fov_x = `printf "%s\n" 'scale = 4; (  ('${center_fov_x}' ) )'  | ${new_bc}`
+set center_fov_y = `printf "%s\n" 'scale = 4; (  ('${center_fov_y}' ) )'  | ${new_bc}`
+set center_fov_z = `printf "%s\n" 'scale = 4; (  ('${center_fov_z}' ) )'  | ${new_bc}`
+
+
+#Rotate and angulate the volume - output a 4x4 matrix
+makerot -t ${rot_x} -a 1,0,0 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_x.mat
+
+makerot -t ${rot_y} -a 0,1,0 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_y.mat
+
+makerot -t ${rot_z} -a 0,0,1 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_z.mat
+
+#Concat matrices
+convert_xfm -omat rot_yz.mat -concat makerot_y.mat makerot_z.mat
+
+convert_xfm -omat rot_xyz.mat -concat makerot_x.mat rot_yz.mat
+
+rm -f makerot_x.mat
+rm -f makerot_y.mat
+rm -f makerot_z.mat
+rm -f rot_yz.mat
+
+
+more rotation.mat > temp_mat.txt
+set mat_line1 = `$AWK '/'0'/ {print $1}' temp_mat.txt`
+set mat_line2 = `$AWK '/'0'/ {print $2}' temp_mat.txt`
+set mat_line3 = `$AWK '/'0'/ {print $3}' temp_mat.txt`
+rm -f temp_mat.txt
+
+set M1 = `echo $mat_line1 | cut -d' ' -f1`
+set M2 = `echo $mat_line1 | cut -d' ' -f2`
+set M3 = `echo $mat_line1 | cut -d' ' -f3`
+set M4 = `echo $mat_line2 | cut -d' ' -f1`
+set M5 = `echo $mat_line2 | cut -d' ' -f2`
+set M6 = `echo $mat_line2 | cut -d' ' -f3`
+set M7 = `echo $mat_line3 | cut -d' ' -f1`
+set M8 = `echo $mat_line3 | cut -d' ' -f2`
+set M9 = `echo $mat_line3 | cut -d' ' -f3`
+
+#Magnitude of direction cosine values will be correct, but signs may not match RDA file from scanner (M1, M3, M4, M6, M8)
+set M1 = `printf "%s\n" 'scale = 4; ( '${M1}'  )' | ${new_bc}`
+set M2 = `printf "%s\n" 'scale = 4; ( '${M2}'  )' | ${new_bc}`
+set M3 = `printf "%s\n" 'scale = 4; ( '${M3}'  )' | ${new_bc}`
+set M4 = `printf "%s\n" 'scale = 4; ( '${M4}'  )' | ${new_bc}`
+set M5 = `printf "%s\n" 'scale = 4; ( '${M5}'  )' | ${new_bc}`
+set M6 = `printf "%s\n" 'scale = 4; ( '${M6}'  )' | ${new_bc}`
+set M7 = `printf "%s\n" 'scale = 4; ( '${M7}'  )' | ${new_bc}`
+set M8 = `printf "%s\n" 'scale = 4; ( '${M8}'  )' | ${new_bc}`
+set M9 = `printf "%s\n" 'scale = 4; ( '${M9}'  )' | ${new_bc}`
+	
+
+#Volume size in pixels
+set size_x_px = `$AWK '/''/ {print $1}' temp_size_px.txt`
+set size_y_px = `$AWK '/''/ {print $2}' temp_size_px.txt`
+set size_z_px = `$AWK '/''/ {print $3}' temp_size_px.txt`
+rm -f temp_size_px.txt
+
+#Translation (magnitude) for the center of volume in mm
+set trans_x_mm = `$AWK '/''/ {print $1}' temp_trans_mm.txt`
+set trans_y_mm = `$AWK '/''/ {print $2}' temp_trans_mm.txt`
+set trans_z_mm = `$AWK '/''/ {print $3}' temp_trans_mm.txt`
+rm -f temp_trans_mm.txt
+
+#Determine the magnitude and sign (negative or positive) for the mm translation of the volume in template space
+set coord_x_mm = `$AWK '/''/ {print $1}' temp_coord.txt`
+set coord_y_mm = `$AWK '/''/ {print $2}' temp_coord.txt`
+set coord_z_mm = `$AWK '/''/ {print $3}' temp_coord.txt`
+rm -f temp_coord.txt
+
+#Determine the coordinates for volume center in template space (mm)
+set vol_coord_x_mm = `$AWK '/''/ {print $1}' temp_volcoord.txt`
+set vol_coord_y_mm = `$AWK '/''/ {print $2}' temp_volcoord.txt`
+set vol_coord_z_mm = `$AWK '/''/ {print $3}' temp_volcoord.txt`
+rm -f temp_volcoord.txt
+
+#Calculate the corner coordinate for the volume in the center of FOV in pixels
+set corner_x = `$AWK '/''/ {print $1}' temp_corners.txt`
+set corner_y = `$AWK '/''/ {print $2}' temp_corners.txt`
+set corner_z = `$AWK '/''/ {print $3}' temp_corners.txt`
+rm -f temp_corners.txt
+
+#Calculate rotation angles using GetEulerAngles.m
+set x_about_z1 = `$AWK '/''/ {print $1}' temp_eul.txt`
+set y_about_z1 = `$AWK '/''/ {print $2}' temp_eul.txt`
+set z_about_x1 = `$AWK '/''/ {print $3}' temp_eul.txt`
+rm -f temp_eul.txt
+
+
+#Rotation angles about each axis 
+
+set M4S = `echo $M4 | cut -d. -f1`
+set M7S = `echo $M7 | cut -d. -f1`
+set M8S = `echo $M8 | cut -d. -f1`
+
+
+set rot_x_calc1  = `printf "%s\n" 'scale = 2; abs( '${x_about_z1}') ' | ${new_bc}`
+set rot_y_calc1  = `printf "%s\n" 'scale = 2; abs( '${y_about_z1}') ' | ${new_bc}`
+set rot_z_calc1  = `printf "%s\n" 'scale = 2; abs( '${z_about_x1}') ' | ${new_bc}`
+
+	
+if ( "$M8S" == "-" ) then
+	set rot_x_calc1  = `printf "%s\n" 'scale = 2; ( '${rot_x_calc1}' * -1 ) ' | ${new_bc}`
+else
+	set rot_x_calc1  = `printf "%s\n" 'scale = 2; ( '${rot_x_calc1}'  ) ' | ${new_bc}`
+endif
+
+if ( "$M7S" == "-" ) then
+	set rot_y_calc1  = `printf "%s\n" 'scale = 2; ( '${rot_y_calc1}'  ) ' | ${new_bc}`
+else
+	set rot_y_calc1  = `printf "%s\n" 'scale = 2; (  '${rot_y_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+
+if ( "$M4S" == "-" ) then
+	set rot_z_calc1  = `printf "%s\n" 'scale = 2; (  '${rot_z_calc1}' * -1 ) ' | ${new_bc}`
+else
+	set rot_z_calc1  = `printf "%s\n" 'scale = 2; (  '${rot_z_calc1}' ) ' | ${new_bc}`
+endif
+
+
+
+
+echo ""
+echo ""
+
+echo "FOV dimensions in px:  $dim_x_px x $dim_y_px x $dim_z_px"  
+echo "Center of FOV in px:  $center_fov_x x $center_fov_y x $center_fov_z"
+echo "Center of FOV in mm:  $ctr_x_mm x $ctr_y_mm x $ctr_z_mm"
+echo "Coordinates for volume center in template space (mm):  $vol_coord_x_mm x $vol_coord_y_mm x $vol_coord_z_mm"
+echo "Translation from FOV center to volume center (mm): $coord_x_mm x $coord_y_mm x $coord_z_mm"
+
+
+#Create volume in center of FOV of template
+fslmaths $template_file -roi $corner_x $size_x_px $corner_y $size_y_px $corner_z $size_z_px 0 1 ${voxel_name}_${study_name}_${mri_orient}_ref.nii.gz
+
+fslmaths ${voxel_name}_${study_name}_${mri_orient}_ref.nii.gz -div ${voxel_name}_${study_name}_${mri_orient}_ref.nii.gz ${voxel_name}_${study_name}_${mri_orient}_ref_voi.nii.gz
+
+echo "Flirting.... this could take a minute..."
+
+#Apply rotation matrix to created volume in center of FOV of template
+flirt -dof 6 -ref $template_file -in ${voxel_name}_${study_name}_${mri_orient}_ref_voi.nii.gz -out ${voxel_name}_${study_name}_${mri_orient}_rotated.nii.gz -applyxfm -init rot_xyz.mat -omat ${voxel_name}_${study_name}_${mri_orient}_rotated.mat 
+
+#Apply translation matrix to rotated volume - move to final position
+flirt -dof 9 -ref $template_file -in ${voxel_name}_${study_name}_${mri_orient}_rotated.nii.gz -out ${voxel_name}_${study_name}_${mri_orient}_final.nii.gz -applyxfm -init voi_2_ref.mat 
+rm -f voi_2_ref.mat 
+
+set timestamp2 = `date +%T`
+
+echo ""
+echo ""
+echo "#################################################################################################"
+echo "#################################################################################################"
+echo "###"
+echo "### Start time:  $timestamp1"
+echo "### End time:  $timestamp2"
+echo "###"
+echo "###  Rotation Angles about each axis (x,y,z; deg) or (T>C,T>S,Rot; deg):"
+echo "###"
+echo "###  Entered by User:  $rot_x , $rot_y , $rot_z"
+echo "###  Calculated (GetEulerAngles.m):  $rot_x_calc1 , $rot_y_calc1 , $rot_z_calc1"
+echo "###"
+echo "#################################################################################################"
+echo "#################################################################################################"
+
+
+
+#View the volume to verify its position in template space
+echo ""
+echo ""
+echo "### FSLview for visual inspection of volume placement in template space"
+
+fslview $template_file ${voxel_name}_${study_name}_${mri_orient}_final.nii.gz -l Red -t 0.4 
+
+
+unset DONE
+
+while (! ${?DONE} )
+
+	echo ""
+	echo "Is this the final size and location for this volume? Do you want append the volume_locations.txt file?"
+	echo "Input response required:  y = 'yes', n = 'no' [default = 'no']"
+	echo ""
+	set input = $<
+
+	if ( $input == 'y' ) then
+	echo "Locating volume_locations.txt file... If not found, will be created..."
+		if ( -e ${testing_dir}/volume_locations.txt ) then
+			echo "Appending volume_locations.txt file with this volume information and ending..."
+    		echo "${voxel_name} ${study_name} ${vol_coord_x_mm} ${vol_coord_y_mm} ${vol_coord_z_mm} ${size_x_mm} ${size_y_mm} ${size_z_mm} ${coord_x_px} ${coord_y_px} ${coord_z_px} ${rot_x_calc1} ${rot_y_calc1} ${rot_z_calc1} ${mri_orient1} ${M1} ${M4} ${M7} ${M2} ${M5} ${M8} ${M3} ${M6} ${M9}" >> ${testing_dir}/volume_locations.txt
+    	else
+    		echo "voxel_name study_name vol_coord_x_mm vol_coord_y_mm vol_coord_z_mm size_x_mm size_y_mm size_z_mm coord_x_px coord_y_px coord_z_px rot_x_calc rot_y_calc rot_z_calc mri_orient" > ${testing_dir}/volume_locations.txt
+    		echo "Appending volume_locations.txt file with this volume information and ending..."
+			echo "${voxel_name} ${study_name} ${vol_coord_x_mm} ${vol_coord_y_mm} ${vol_coord_z_mm} ${size_x_mm} ${size_y_mm} ${size_z_mm} ${coord_x_px} ${coord_y_px} ${coord_z_px} ${rot_x_calc1} ${rot_y_calc1} ${rot_z_calc1} ${mri_orient1} ${M1} ${M4} ${M7} ${M2} ${M5} ${M8} ${M3} ${M6} ${M9}" >> ${testing_dir}/volume_locations.txt
+    	endif
+    	if ( -e ${voxel_name}_${study_name}_${mri_orient}_test.nii.gz ) then
+    	    rm -f ${voxel_name}_${study_name}_${mri_orient}_test.nii.gz
+    	else
+    	endif
+    	if ( -e ${voxel_name}_${study_name}_${mri_orient}_ref_test_coord.txt ) then
+    	    rm -f ${voxel_name}_${study_name}_${mri_orient}_ref_test_coord.txt
+    	else
+    	endif
+
+    set DONE              
+		
+		
+		if ( $input == 'n' ) then
+			echo "Volume_locations.txt file will not be appended. This volume information will be written to ${voxel_name}_${study_name}_ref_test_coord.txt..."
+			echo "voxel_name study_name vol_coord_x_mm vol_coord_y_mm vol_coord_z_mm size_x_mm size_y_mm size_z_mm coord_x_px coord_y_px coord_z_px rot_x_calc rot_y_calc rot_z_calc mri_orient" > ${testing_dir}/${voxel_name}_${study_name}_ref_test_coord.txt
+			echo "${voxel_name} ${study_name} ${vol_coord_x_mm} ${vol_coord_y_mm} ${vol_coord_z_mm} ${size_x_mm}  ${size_y_mm}  ${size_z_mm} ${coord_x_px} ${coord_y_px} ${coord_z_px} ${rot_x_calc1} ${rot_y_calc1} ${rot_z_calc1} ${mri_orient1} ${M1} ${M4} ${M7} ${M2} ${M5} ${M8} ${M3} ${M6} ${M9}" >> ${testing_dir}/${voxel_name}_${study_name}_ref_test_coord.txt
+			mv ${voxel_name}_${study_name}_${mri_orient}_final.nii.gz ${voxel_name}_${study_name}_${mri_orient}_test.nii.gz
+			set DONE  
+		else
+		endif
+	else
+
+
+	echo "Volume_locations.txt file will not be appended. This volume information will be written to ${voxel_name}_${study_name}_ref_test_coord.txt..."
+	echo "voxel_name study_name vol_coord_x_mm vol_coord_y_mm vol_coord_z_mm size_x_mm size_y_mm size_z_mm coord_x_px coord_y_px coord_z_px rot_x_calc rot_y_calc rot_z_calc mri_orient" > ${testing_dir}/${voxel_name}_${study_name}_ref_test_coord.txt
+	echo "${voxel_name} ${study_name} ${vol_coord_x_mm} ${vol_coord_y_mm} ${vol_coord_z_mm} ${size_x_mm}  ${size_y_mm}  ${size_z_mm} ${coord_x_px} ${coord_y_px} ${coord_z_px} ${rot_x_calc1} ${rot_y_calc1} ${rot_z_calc1} ${mri_orient1} ${M1} ${M4} ${M7} ${M2} ${M5} ${M8} ${M3} ${M6} ${M9}" >> ${testing_dir}/${voxel_name}_${study_name}_ref_test_coord.txt
+	mv ${voxel_name}_${study_name}_${mri_orient}_final.nii.gz ${voxel_name}_${study_name}_${mri_orient}_test.nii.gz
+	set DONE
+	endif
+	
+end
+
+
+
+
+#housekeeping
+rm -f rotation.mat
+rm -f rot_xyz.mat
+rm -f ${voxel_name}_${study_name}_${mri_orient}_ref_voi.nii.gz
+rm -f ${voxel_name}_${study_name}_${mri_orient}_ref.nii.gz
+rm -f ${voxel_name}_${study_name}_${mri_orient}_rotated.nii.gz
+rm -f ${voxel_name}_${study_name}_${mri_orient}_rotation.mat
+rm -f ${voxel_name}_${study_name}_${mri_orient}_rotated.mat
+
+if ( ! -e "dicom_files" ) then
+	mkdir dicom_files
+else
+endif
+
+if ( -e $testing_dir/avp_config.txt ) then
+	set study_dir = `$AWK '/study_dir:/ { print $2 }' $avp_config_file`
+	if ( ! -e "${study_dir}" ) then
+		mkdir ${study_dir}
+	else
+	endif
+	if ( ! -e "${study_dir}/${study_name}" ) then
+		mkdir ${study_dir}/${study_name}
+	else
+	endif
+else
+	cd ..
+	mkdir studies
+		if ( ! -e "./studies/${study_name}" ) then
+			mkdir ./studies/${study_name}
+	else
+		endif
+	
+endif
+
+
+exit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1654 @@
+#!/bin/tcsh -f
+
+##This script will use voxel information stored in the rda files and calculate voxel placement accuracy (to the template location), between- and within-subject voxel overlap percentage.  
+##Author:  Eric Woodcock, Wayne State University School of Medicine
+##Version:  5.0
+##Most Recent Modification:  Sept, 2016
+##Questions/Problems:  ewoodcoc@med.wayne.edu
+##Inputs:  All inputs are prompted. User selects voxel and study for which to calculate overlap. 
+
+
+#housekeeping
+set program = $0
+set program = $program:t 
+set machine = `echo $HOST | cut -d. -f1`
+set proc_date = `date +%m/%d/%Y`
+set testing_dir = `pwd`
+set voi_loc_file = "${testing_dir}/volume_locations.txt"
+set AWK	= "gawk"
+set dicom_folder = "dicom_files"
+	
+if ( -e ${testing_dir}/avp_config.txt ) then
+	set avp_config_file = "${testing_dir}/avp_config.txt"
+	set new_bc = `$AWK '/new_bc:/ { print $2 }' ${avp_config_file}`
+	set matlab_dir = `$AWK '/matlab_dir:/ { print $2 }' ${avp_config_file}`
+	set study_dir = `$AWK '/study_dir:/ { print $2 }' ${avp_config_file}`
+else
+	set new_bc = "${testing_dir}/new_bc"
+	set matlab_dir = "/home/dicom/gdrive/scripts"
+	cd ..
+	set dir = `pwd`
+	set study_dir = "${dir}/studies"
+	cd ${testing_dir}
+endif
+	
+
+
+unset DONE
+
+while (! ${?DONE} )
+
+#User inputs
+
+
+	more ${voi_loc_file} > temp1.txt
+	
+	set count = 0
+	set list  = ""
+	set voi_list1 = `$AWK '/''/ {print $1}' temp1.txt`
+	set voi_list = `echo $voi_list1 | cut -d' ' -f 2-`
+	set voi_study1 = `$AWK '/''/ {print $2}' temp1.txt`
+	set orient1 = `$AWK '/''/ {print $15}' temp1.txt`
+	
+	echo ""
+	echo "Label RDA files: '[SubjectID][TimePoint]_[VoxelName].rda_hdr'"
+	echo "Place one RDA file for each subject, voxel, and scan in the study RDA folder"
+	echo ""
+	echo -n "Press 'Enter' when finished"
+	set rdas = $<
+	
+	switch ( $rdas )
+		case y:           
+	breaksw
+	case n:
+		echo ""
+		echo "Start again..."
+		echo ""
+		end
+	default:
+	endsw
+	
+	echo ""
+	echo "Select the study and voxel location for which you want to calculate percentage overlap (enter number):"
+	echo ""
+	foreach voi ( $voi_list)
+		set count = `printf "%s\n" 'scale = 1; ( '$count'  + 1 ) ' | ${new_bc}`
+		set count2 = `printf "%s\n" 'scale = 1; ( '$count'  + 1 ) ' | ${new_bc}`
+		set voi_study = `echo $voi_study1 | cut -d' ' -f $count2`
+		set orient = `echo $orient1 | cut -d' ' -f $count2`
+     	echo "${count} <-- $voi_study $voi"
+	end ; 
+
+	echo ""
+	set input = $<
+
+	set selected_num = $input
+	set selected_num2 = `printf "%s\n" 'scale = 1; ( '$selected_num'  + 1 ) ' | ${new_bc}`
+
+	
+	echo ""
+	echo "Is the following selection correct (y/n)? [y (default)]"
+	echo ""
+	set voxel_name = "$voi_list[$selected_num]"
+	set study_name = "$voi_study1[$selected_num2]"
+	set mri_orient1 = "$orient1[$selected_num2]"
+	echo "[${selected_num}] ${study_name} ${voxel_name}"   
+	echo ""
+	
+	set input = $<
+
+	switch ( $input )
+		case y:
+      		set DONE              
+	breaksw
+	case n:
+		echo ""
+		echo "### Start again... "
+		echo "##############################"
+		echo "-------   VOI List   -------"
+		echo ""
+	breaksw
+	default:
+	 	set DONE
+	endsw
+
+	rm -f temp1.txt
+
+	echo "Warning:  Processing time may be substantial (>30 minutes)..."
+	echo ""
+	
+set orient_lr = `echo ${mri_orient1} | cut -d, -f1` 
+set orient_ap = `echo ${mri_orient1} | cut -d, -f2` 
+set orient_si = `echo ${mri_orient1} | cut -d, -f3` 
+set mri_orient = `echo ${orient_lr}${orient_ap}${orient_si}` 
+
+#Set template file and rda directory
+set template_file = "${testing_dir}/${study_name}_${mri_orient}_template.nii.gz"
+
+if ( -e $testing_dir/avp_config.txt ) then
+	set rda_dir = `$AWK '/rda_dir:/ { print $2 }' ${avp_config_file}`
+else
+	set rda_dir = "${study_dir}/${study_name}/rda_files"
+endif
+
+
+if ( ! -e "${study_dir}/${study_name}/overlap" ) then
+	mkdir ${study_dir}/${study_name}/overlap
+	set overlap_dir = "${study_dir}/${study_name}/overlap"
+	mkdir ${overlap_dir}/image_files
+	set image_dir = "${overlap_dir}/image_files"
+else
+	set overlap_dir = "${study_dir}/${study_name}/overlap"
+	set image_dir = "${overlap_dir}/image_files"
+endif
+
+#Change directory into the study folder selected
+
+
+cd ${rda_dir}
+
+#Start the foreach loop of all RDA files in the RDA_files folder for selected study
+
+echo "Step 1:  Create the necessary image files for each rda file located herein:  ${rda_dir}"
+
+foreach rda_file ( `ls ${study_name}*_${voxel_name}.rda_hdr` )
+
+
+set subj_numb = `echo $rda_file | cut -c4-7`
+set time_point = `echo $rda_file | cut -c8`
+set subj_name = `echo $rda_file | cut -c1-8`
+
+
+if ( ! -e "${image_dir}/${subj_name}_${voxel_name}_${mri_orient}_subj_space_hires.nii.gz" ) then
+	if ( ! -e "${rda_dir}/rda_list.txt" ) then
+		echo "$rda_file" > rda_list.txt
+	else
+		echo "$rda_file" >> rda_list.txt
+	endif
+else
+	continue
+endif
+
+
+end
+
+set rda_list = `$AWK '/''/ {print $1}' rda_list.txt`
+
+rm -f rda_list.txt
+
+foreach rda_file ( `echo ${rda_list}` )
+
+
+set subj_numb = `echo $rda_file | cut -c4-7`
+set time_point = `echo $rda_file | cut -c8`
+set subj_name = `echo $rda_file | cut -c1-8`
+
+
+if ( ! -e "${study_dir}/${study_name}/${subj_name}/t1_${subj_name}_${mri_orient}.nii.gz" ) then
+	echo "T1 file not found for:  $rda_file.  Skipping..."
+else
+	if ( ! -e "${rda_dir}/rda_list.txt" ) then
+		echo "$rda_file" > rda_list.txt
+	else
+		echo "$rda_file" >> rda_list.txt
+	endif
+
+endif
+
+end
+
+if ( -e "${rda_dir}/rda_list.txt" ) then 
+	
+set rda_list = `$AWK '/''/ {print $1}' rda_list.txt`
+
+rm -f rda_list.txt
+
+foreach rda_file ( `echo ${rda_list}` )
+
+set subj_numb = `echo $rda_file | cut -c4-7`
+set time_point = `echo $rda_file | cut -c8`
+set subj_name = `echo $rda_file | cut -c1-8`
+
+dos2unix ${rda_file}
+
+	set orientation1 = `mri_info ${study_dir}/${study_name}/${subj_name}/t1_${subj_name}*.nii.gz | $AWK '/Orientation/ {print $3}'`
+		if ( "$orientation1" == "${mri_orient}" ) then
+			echo "FOUND T1 file:  t1_${subj_name}_${mri_orient}.nii.gz"
+			set t1_file = ${study_dir}/${study_name}/${subj_name}/t1_${subj_name}_${mri_orient}.nii.gz
+			set t1_good = "yes"
+		else
+			set orientation1 = `mri_info ${study_dir}/${study_name}/${subj_name}/t1_${study_name}${subj_numb}*.nii.gz | $AWK '/Orientation/ {print $3}'`
+			mri_convert -it nii -ot nii ${study_dir}/${study_name}/${subj_name}/t1_${subj_name}*.nii.gz ${study_dir}/${study_name}/${subj_name}/t1_${subj_name}_${mri_orient}.nii.gz --in_orientation $orientation1 --out_orientation ${mri_orient}
+			echo "FOUND T1 file:  t1_${subj_name}_${mri_orient}.nii.gz"
+			set t1_file = ${study_dir}/${study_name}/${subj_name}/t1_${subj_name}_${mri_orient}.nii.gz
+			set t1_good = "yes"
+		endif
+		
+echo "RDA file being processed:  ${rda_file} "
+
+more ${rda_file} > temp1.txt
+
+
+#Rotation matrix
+
+set row_0 = `$AWK '/RowVector\[0\]/ { print $2 }' temp1.txt`
+set row_0 = `printf "%s\n" 'scale = 3; ( abs( '${row_0}' ))' | ${new_bc}`
+set row_1 = `$AWK '/RowVector\[1\]/ { print $2 }' temp1.txt`
+set row_2 = `$AWK '/RowVector\[2\]/ { print $2 }' temp1.txt`
+	
+set column_0 = `$AWK '/ColumnVector\[0\]/ { print $2 }' temp1.txt`
+set column_1 = `$AWK '/ColumnVector\[1\]/ { print $2 }' temp1.txt`
+set column_2 = `$AWK '/ColumnVector\[2\]/ { print $2 }' temp1.txt`
+	
+set voi_norm_sag = `$AWK '/VOINormalSag/ { print $2 }' temp1.txt`
+set voi_norm_cor = `$AWK '/VOINormalCor/ { print $2 }' temp1.txt`
+set voi_norm_tra = `$AWK '/VOINormalTra/ { print $2 }' temp1.txt`
+
+#Voxel dimensions
+
+set size_y_px = `$AWK '/PixelSpacingRow/ { print $2 }' temp1.txt`
+set size_x_px = `$AWK '/PixelSpacingCol/ { print $2 }' temp1.txt`
+set size_z_px = `$AWK '/PixelSpacing3D/ { print $2 }' temp1.txt`
+
+#Voxel center coordinates
+
+set voi_pos_sag = `$AWK '/VOIPositionSag/ { print $2 }' temp1.txt`
+set voi_pos_cor = `$AWK '/VOIPositionCor/ { print $2 }' temp1.txt`
+set voi_pos_tra = `$AWK '/VOIPositionTra/ { print $2 }' temp1.txt`
+
+#Correct for default Siemens scanner space
+set voi_pos_sag = `printf "%s\n" 'scale = 4; (  '${voi_pos_sag}' * -1 )'  | ${new_bc}`
+set voi_pos_cor = `printf "%s\n" 'scale = 4; (  '${voi_pos_cor}' * -1 )'  | ${new_bc}`
+set voi_pos_tra = `printf "%s\n" 'scale = 4; (  '${voi_pos_tra}'  )'  | ${new_bc}`
+
+rm -f temp1.txt
+
+
+echo "Gathering subject T1 parameters..."
+
+mri_info ${t1_file} > temp.txt
+
+#Get FOV dimensions in px from subject T1
+set dim_x_px = `$AWK '/'dimensions:'/ {print $2}' temp.txt`
+set dim_y_px = `$AWK '/'dimensions:'/ {print $4}' temp.txt`
+set dim_z_px = `$AWK '/'dimensions:'/ {print $6}' temp.txt`
+
+#Get center of FOV in mm from subject T1
+set ctr_x_mm = `$AWK '/'c_r'/ {print $14}' temp.txt`
+set ctr_y_mm = `$AWK '/'c_a'/ {print $13}' temp.txt`
+set ctr_z_mm = `$AWK '/'c_s'/ {print $13}' temp.txt`
+
+
+grep -n 0 temp.txt > temp1.txt
+
+rm -f temp.txt
+
+#Find the zero value in subject T1
+set zero_x_mm = `$AWK '/'30:'/ {print $5}' temp1.txt`
+set zero_y_mm = `$AWK '/'31:'/ {print $5}' temp1.txt`
+set zero_z_mm = `$AWK '/'32:'/ {print $5}' temp1.txt`
+
+set zero_x_mm = `printf "%s\n" 'scale = 4; ( ( '${zero_x_mm}' ) )' | ${new_bc}`
+set zero_y_mm = `printf "%s\n" 'scale = 4; ( ( '${zero_y_mm}' ) )' | ${new_bc}`
+set zero_z_mm = `printf "%s\n" 'scale = 4; ( ( '${zero_z_mm}' ) )' | ${new_bc}`
+
+#Get pixel dimensions subject T1
+set pixdimx = `fslsize ${t1_file} | $AWK '/pixdim1/ { print $2 }'`
+set pixdimy = `fslsize ${t1_file} | $AWK '/pixdim2/ { print $2 }'`
+set pixdimz = `fslsize ${t1_file} | $AWK '/pixdim3/ { print $2 }'`
+
+rm -f temp1.txt
+
+
+#Calculate rotation matrix to convert subject T1 to template space
+flirt -dof 6 -in ${template_file} -ref ${t1_file} -omat ${voxel_name}_${study_name}_${mri_orient}_rot.mat 
+
+convert_xfm ${voxel_name}_${study_name}_${mri_orient}_rot.mat -omat ${voxel_name}_${study_name}_${mri_orient}_rot_inv.mat 
+
+more ${voxel_name}_${study_name}_${mri_orient}_rot_inv.mat > temp2.txt
+
+set mat_line1 = `$AWK '/''/ {print $1}' temp2.txt`
+set mat_line2 = `$AWK '/''/ {print $2}' temp2.txt`
+set mat_line3 = `$AWK '/''/ {print $3}' temp2.txt`
+rm -f temp2.txt
+rm -f ${voxel_name}_${study_name}_${mri_orient}_rot.mat
+rm -f ${voxel_name}_${study_name}_${mri_orient}_rot_inv.mat
+
+set M1 = `echo $mat_line1 | cut -d' ' -f1`
+set M2 = `echo $mat_line1 | cut -d' ' -f2`
+set M3 = `echo $mat_line1 | cut -d' ' -f3`
+set M4 = `echo $mat_line2 | cut -d' ' -f1`
+set M5 = `echo $mat_line2 | cut -d' ' -f2`
+set M6 = `echo $mat_line2 | cut -d' ' -f3`
+set M7 = `echo $mat_line3 | cut -d' ' -f1`
+set M8 = `echo $mat_line3 | cut -d' ' -f2`
+set M9 = `echo $mat_line3 | cut -d' ' -f3`
+
+
+#Calculate voxel center coordinates in template space using flirt dof=9
+
+flirt -dof 9 -in ${template_file} -ref ${t1_file} -omat ${voxel_name}_${study_name}_${mri_orient}_pos.mat 
+
+convert_xfm  -inverse ${voxel_name}_${study_name}_${mri_orient}_pos.mat  -omat ${voxel_name}_${study_name}_${mri_orient}_pos_inv.mat 	
+
+set temp_coord_file_mm = temp_coord_mm.txt
+
+echo "${voi_pos_sag} ${voi_pos_cor} ${voi_pos_tra}" > ${temp_coord_file_mm}	
+
+echo "Transforming center voxel coordinate from reference to subject ... "
+
+set vox_ctr_mm = `img2imgcoord -src ${t1_file} -dest ${template_file}  -xfm ${voxel_name}_${study_name}_${mri_orient}_pos_inv.mat -mm ${temp_coord_file_mm}`
+
+set vox_ctr_mm_x = $vox_ctr_mm[7]
+set vox_ctr_mm_y = $vox_ctr_mm[8]
+set vox_ctr_mm_z = $vox_ctr_mm[9]
+
+set templ_vox_ctr_mm_x = `printf "%s\n" 'scale = 2; ( ( '${vox_ctr_mm_x}' ) )' | ${new_bc}`
+set templ_vox_ctr_mm_y = `printf "%s\n" 'scale = 2; ( ( '${vox_ctr_mm_y}' ) )' | ${new_bc}`
+set templ_vox_ctr_mm_z = `printf "%s\n" 'scale = 2; ( ( '${vox_ctr_mm_z}' ) )' | ${new_bc}`
+rm -f ${voxel_name}_${study_name}_${mri_orient}_pos.mat 
+rm -f ${voxel_name}_${study_name}_${mri_orient}_pos_inv.mat 
+rm -f temp_coord_mm.txt
+
+
+mri_info ${template_file} > template.txt
+
+#Get FOV dimensions in px from template T1
+set templ_dim_x_px = `$AWK '/'dimensions:'/ {print $2}' template.txt`
+set templ_dim_y_px = `$AWK '/'dimensions:'/ {print $4}' template.txt`
+set templ_dim_z_px = `$AWK '/'dimensions:'/ {print $6}' template.txt`
+
+
+#Get center of FOV in mm from template T1
+set templ_ctr_x_mm = `$AWK '/'c_r'/ {print $14}' template.txt`
+set templ_ctr_y_mm = `$AWK '/'c_a'/ {print $13}' template.txt`
+set templ_ctr_z_mm = `$AWK '/'c_s'/ {print $13}' template.txt`
+
+grep -n 0 template.txt > template2.txt
+rm -f template.txt
+
+#Find the zero value in template T1
+set templ_zero_x_mm = `$AWK '/'30:'/ {print $5}' template2.txt`
+set templ_zero_y_mm = `$AWK '/'31:'/ {print $5}' template2.txt`
+set templ_zero_z_mm = `$AWK '/'32:'/ {print $5}' template2.txt`
+
+set templ_zero_x_mm = `printf "%s\n" 'scale = 3; ( ( '${templ_zero_x_mm}' ) )' | ${new_bc}`
+set templ_zero_y_mm = `printf "%s\n" 'scale = 3; ( ( '${templ_zero_y_mm}' ) )' | ${new_bc}`
+set templ_zero_z_mm = `printf "%s\n" 'scale = 3; ( ( '${templ_zero_z_mm}' ) )' | ${new_bc}`
+
+
+#Get pixel dimensions template T1
+set templ_pixdimx = `fslsize ${template_file} | $AWK '/pixdim1/ { print $2 }'`
+set templ_pixdimy = `fslsize ${template_file} | $AWK '/pixdim2/ { print $2 }'`
+set templ_pixdimz = `fslsize ${template_file} | $AWK '/pixdim3/ { print $2 }'`
+
+set templ_pixdimx = `printf "%s\n" 'scale = 4; ( ( '${templ_pixdimx}' ) )' | ${new_bc}`
+set templ_pixdimy = `printf "%s\n" 'scale = 4; ( ( '${templ_pixdimy}' ) )' | ${new_bc}`
+set templ_pixdimz = `printf "%s\n" 'scale = 4; ( ( '${templ_pixdimz}' ) )' | ${new_bc}`
+
+
+rm -f template2.txt
+
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+path(path,'$matlab_dir')
+center_fov_x = ( $dim_x_px / 2 );
+center_fov_y = ( $dim_y_px / 2 );
+center_fov_z = ( $dim_z_px / 2 );
+templ_center_fov_x = ( $templ_dim_x_px / 2 );
+templ_center_fov_y = ( $templ_dim_y_px / 2 );
+templ_center_fov_z = ( $templ_dim_z_px / 2 );
+center_fov = round2dp([ center_fov_x center_fov_y center_fov_z templ_center_fov_x templ_center_fov_y templ_center_fov_z ], 3);
+dlmwrite('temp_center_fov.txt',center_fov,'delimiter','\t','precision',3)
+trans_x_mm = $voi_pos_sag - $ctr_x_mm;
+trans_y_mm = $voi_pos_cor - $ctr_y_mm;
+trans_z_mm = $voi_pos_tra - $ctr_z_mm;
+templ_trans_x_mm = $templ_vox_ctr_mm_x - $templ_ctr_x_mm;
+templ_trans_y_mm = $templ_vox_ctr_mm_y - $templ_ctr_y_mm;
+templ_trans_z_mm = $templ_vox_ctr_mm_z - $templ_ctr_z_mm;
+trans_mm = round2dp([ trans_x_mm trans_y_mm trans_z_mm templ_trans_x_mm templ_trans_y_mm templ_trans_z_mm ],3);
+dlmwrite('temp_trans_mm.txt',trans_mm,'delimiter','\t','precision',3)
+zero_x_mm = round2dp($zero_x_mm,2);
+zero_y_mm = round2dp($zero_y_mm,2);
+zero_z_mm = round2dp($zero_z_mm,2);
+if ( (trans_x_mm - zero_x_mm) > 0 ) 
+coord_x_mm = trans_x_mm;
+else;
+coord_x_mm = trans_x_mm * -1;
+end;
+if ( (trans_y_mm - zero_y_mm) > 0 )
+coord_y_mm = trans_y_mm * -1;
+else;
+coord_y_mm = trans_y_mm;
+end;
+if ( (trans_z_mm - zero_z_mm) > 0 )
+coord_z_mm = trans_z_mm * -1;
+else;
+coord_z_mm = trans_z_mm ;
+end;
+templ_zero_x_mm = round2dp($templ_zero_x_mm,2);
+templ_zero_y_mm = round2dp($templ_zero_y_mm,2);
+templ_zero_z_mm = round2dp($templ_zero_z_mm,2);
+if ( (templ_trans_x_mm - templ_zero_x_mm) > 0 ) 
+templ_coord_x_mm = templ_trans_x_mm;
+else;
+templ_coord_x_mm = templ_trans_x_mm * -1;
+end;
+if ( (templ_trans_y_mm - templ_zero_y_mm) > 0 )
+templ_coord_y_mm = templ_trans_y_mm * -1;
+else;
+templ_coord_y_mm = templ_trans_y_mm;
+end;
+if ( (templ_trans_z_mm - templ_zero_z_mm) > 0 )
+templ_coord_z_mm = templ_trans_z_mm * -1;
+else;
+templ_coord_z_mm = templ_trans_z_mm ;
+end;
+coords = round2dp([ coord_x_mm coord_y_mm coord_z_mm templ_coord_x_mm templ_coord_y_mm templ_coord_z_mm],3);
+dlmwrite('temp_coord.txt',coords,'delimiter','\t','precision',3)
+templ_corner_x = templ_center_fov_x - ($size_x_px / 2);
+templ_corner_y = templ_center_fov_y - ($size_y_px / 2);
+templ_corner_z = templ_center_fov_z - ($size_z_px / 2);
+corner_x = center_fov_x - ($size_x_px / 2);
+corner_y = center_fov_y - ($size_y_px / 2);
+corner_z = center_fov_z - ($size_z_px / 2);
+corners = round2dp([ corner_x corner_y corner_z templ_corner_x templ_corner_y templ_corner_z ], 3);
+dlmwrite('temp_corners.txt',corners,'delimiter','\t','precision',3)
+ROT = [ ${row_0} ${column_0} ${voi_norm_sag} ; ${row_1} ${column_1} ${voi_norm_cor} ; ${row_2} ${column_2} ${voi_norm_tra} ];
+M1 = round2dp($M1,5); 
+M2 = round2dp($M2,5);
+M3 = round2dp($M3,5);
+M4 = round2dp($M4,5);
+M5 = round2dp($M5,5);
+M6 = round2dp($M6,5);
+M7 = round2dp($M7,5);
+M8 = round2dp($M8,5);
+M9 = round2dp($M9,5);
+M = [ M1 M4 M7 ; M2 M5 M8 ; M3 M6 M9 ];
+M = round2dp(M,5);
+ROT = round2dp(ROT,5);
+V = ROT * M;
+V = round2dp(V,5);
+MR2 = ROT(1,2);
+MR2 = round2dp(MR2,2);
+MR3 = ROT(1,3);
+MR3 = round2dp(MR3,2);
+MR6 = ROT(2,3);
+MR6 = round2dp(MR6,2);
+MRR = [ MR2 MR3 MR6 ];
+dlmwrite('temp_signs.txt',MRR,'delimiter','\t','precision',3)
+[t1, t2, t3] = GetEulerAngles(ROT);
+Y = [t1, t2, t3];
+YY = real(round2dp(rad2deg(Y),3));
+dlmwrite('temp_eul.txt',YY,'delimiter','\t','precision',3)	
+MV2 = V(1,2);
+MV2 = round2dp(MV2,2);
+MV3 = V(1,3);
+MV3 = round2dp(MV3,2);
+MV6 = V(2,3);
+MV6 = round2dp(MV6,2);
+MVR = [ MV2 MV3 MV6 ];
+dlmwrite('template_signs.txt',MVR,'delimiter','\t','precision',3)
+[tmp1, tmp2, tmp3] = GetEulerAngles(V);
+Z = [tmp1, tmp2, tmp3];
+ZZ = real(round2dp(rad2deg(Z),2));
+dlmwrite('template_eul.txt',ZZ,'delimiter','\t','precision',3)	
+S = [1 1 1];
+R = [0 0 0];
+T = round2dp([ coord_x_mm coord_y_mm coord_z_mm ],4);
+filename = 'voi_2_ref.mat';
+makeFslXfmMatrix(T, R, S, filename);
+TT = round2dp([ templ_coord_x_mm templ_coord_y_mm templ_coord_z_mm ],4);
+filename2 = 'voi_2_templ.mat';
+makeFslXfmMatrix(TT, R, S, filename2);
+EOF
+	
+
+
+#Determine signs of rotation angles in subject space
+set M4 = `$AWK '/'0'/ {print $1}' temp_signs.txt`
+set M7 = `$AWK '/'0'/ {print $2}' temp_signs.txt`
+set M8 = `$AWK '/'0'/ {print $3}' temp_signs.txt`
+rm -f temp_signs.txt
+
+set M4 = `printf "%s\n" 'scale = 4; ( '${M4}'  )' | ${new_bc}`
+set M7 = `printf "%s\n" 'scale = 4; ( '${M7}'  )' | ${new_bc}`
+set M8 = `printf "%s\n" 'scale = 4; ( '${M8}'  )' | ${new_bc}`
+
+#Rotation angles about each axis in subject space 
+set M4S = `echo $M4 | cut -d. -f1`
+set M7S = `echo $M7 | cut -d. -f1`
+set M8S = `echo $M8 | cut -d. -f1`
+
+#Grab calculated rotation angles using GetEulerAngles.m in subject space
+set x_about_z = `$AWK '/''/ {print $1}' temp_eul.txt`
+set y_about_z = `$AWK '/''/ {print $2}' temp_eul.txt`
+set z_about_x = `$AWK '/''/ {print $3}' temp_eul.txt`
+rm -f temp_eul.txt
+
+
+set rot_x_calc1  = `printf "%s\n" 'scale = 3; abs( '${x_about_z}') ' | ${new_bc}`
+set rot_y_calc1  = `printf "%s\n" 'scale = 3; abs( '${y_about_z}') ' | ${new_bc}`
+set rot_z_calc1  = `printf "%s\n" 'scale = 3; abs( '${z_about_x}') ' | ${new_bc}`
+
+	
+if ( "$M8S" == "-" ) then
+	set rot_x_calc  = `printf "%s\n" 'scale = 3; ( '${rot_x_calc1}'   ) ' | ${new_bc}`
+else
+	set rot_x_calc  = `printf "%s\n" 'scale = 3; ( '${rot_x_calc1}' * -1 ) ' | ${new_bc}`
+endif
+
+if ( "$M7S" == "-" ) then
+	set rot_y_calc  = `printf "%s\n" 'scale = 3; ( '${rot_y_calc1}'  ) ' | ${new_bc}`
+else
+	set rot_y_calc  = `printf "%s\n" 'scale = 3; (  '${rot_y_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+
+if ( "$M4S" == "-" ) then
+	set rot_z_calc  = `printf "%s\n" 'scale = 3; (  '${rot_z_calc1}' ) ' | ${new_bc}`
+else
+	set rot_z_calc  = `printf "%s\n" 'scale = 3; (  '${rot_z_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+
+
+
+#Determine signs of rotation angles of voxel in template
+set MT4 = `$AWK '/'0'/ {print $1}' template_signs.txt`
+set MT7 = `$AWK '/'0'/ {print $2}' template_signs.txt`
+set MT8 = `$AWK '/'0'/ {print $3}' template_signs.txt`
+rm -f template_signs.txt
+
+set MT4 = `printf "%s\n" 'scale = 4; ( '${MT4}'  )' | ${new_bc}`
+set MT7 = `printf "%s\n" 'scale = 4; ( '${MT7}'  )' | ${new_bc}`
+set MT8 = `printf "%s\n" 'scale = 4; ( '${MT8}'  )' | ${new_bc}`
+
+#Rotation angles about each axis of voxel in template
+set MT4S = `echo $MT4 | cut -d. -f1`
+set MT7S = `echo $MT7 | cut -d. -f1`
+set MT8S = `echo $MT8 | cut -d. -f1`
+
+#Grab calculated rotation angles using GetEulerAngles.m in template
+set x_about_z = `$AWK '/''/ {print $1}' template_eul.txt`
+set y_about_z = `$AWK '/''/ {print $2}' template_eul.txt`
+set z_about_x = `$AWK '/''/ {print $3}' template_eul.txt`
+rm -f template_eul.txt
+
+
+set rot_x_calc1  = `printf "%s\n" 'scale = 3; abs( '${x_about_z}') ' | ${new_bc}`
+set rot_y_calc1  = `printf "%s\n" 'scale = 3; abs( '${y_about_z}') ' | ${new_bc}`
+set rot_z_calc1  = `printf "%s\n" 'scale = 3; abs( '${z_about_x}') ' | ${new_bc}`
+
+	
+if ( "$MT8S" == "-" ) then
+	set rot_x_calc_templ  = `printf "%s\n" 'scale = 3; ( '${rot_x_calc1}'  ) ' | ${new_bc}`
+else
+	set rot_x_calc_templ  = `printf "%s\n" 'scale = 3; ( '${rot_x_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+if ( "$MT7S" == "-" ) then
+	set rot_y_calc_templ  = `printf "%s\n" 'scale = 3; ( '${rot_y_calc1}'  ) ' | ${new_bc}`
+else
+	set rot_y_calc_templ  = `printf "%s\n" 'scale = 3; (  '${rot_y_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+
+if ( "$MT4S" == "-" ) then
+	set rot_z_calc_templ  = `printf "%s\n" 'scale = 3; (  '${rot_z_calc1}' ) ' | ${new_bc}`
+else
+	set rot_z_calc_templ  = `printf "%s\n" 'scale = 3; (  '${rot_z_calc1}' * -1  ) ' | ${new_bc}`
+endif
+
+
+#FOV center in pixels
+set center_fov_x = `$AWK '/''/ {print $1}' temp_center_fov.txt`
+set center_fov_y = `$AWK '/''/ {print $2}' temp_center_fov.txt`
+set center_fov_z = `$AWK '/''/ {print $3}' temp_center_fov.txt`
+set templ_center_fov_x = `$AWK '/''/ {print $4}' temp_center_fov.txt`
+set templ_center_fov_y = `$AWK '/''/ {print $5}' temp_center_fov.txt`
+set templ_center_fov_z = `$AWK '/''/ {print $6}' temp_center_fov.txt`
+rm -f temp_center_fov.txt
+
+#FOV center in pixels
+set center_fov_x = `printf "%s\n" 'scale = 4; (  ('${center_fov_x}' ) )'  | ${new_bc}`
+set center_fov_y = `printf "%s\n" 'scale = 4; (  ('${center_fov_y}' ) )'  | ${new_bc}`
+set center_fov_z = `printf "%s\n" 'scale = 4; (  ('${center_fov_z}' ) )'  | ${new_bc}`
+set templ_center_fov_x = `printf "%s\n" 'scale = 4; (  ('${templ_center_fov_x}' ) )'  | ${new_bc}`
+set templ_center_fov_y = `printf "%s\n" 'scale = 4; (  ('${templ_center_fov_y}' ) )'  | ${new_bc}`
+set templ_center_fov_z = `printf "%s\n" 'scale = 4; (  ('${templ_center_fov_z}' ) )'  | ${new_bc}`
+
+
+#Translation (magnitude) for the center of volume in mm
+set trans_x_mm = `$AWK '/''/ {print $1}' temp_trans_mm.txt`
+set trans_y_mm = `$AWK '/''/ {print $2}' temp_trans_mm.txt`
+set trans_z_mm = `$AWK '/''/ {print $3}' temp_trans_mm.txt`
+rm -f temp_trans_mm.txt
+
+#Determine the magnitude and sign (negative or positive) for the mm translation of the volume in template space
+set coord_x_mm = `$AWK '/''/ {print $1}' temp_coord.txt`
+set coord_y_mm = `$AWK '/''/ {print $2}' temp_coord.txt`
+set coord_z_mm = `$AWK '/''/ {print $3}' temp_coord.txt`
+set templ_coord_x_mm = `$AWK '/''/ {print $4}' temp_coord.txt`
+set templ_coord_y_mm = `$AWK '/''/ {print $5}' temp_coord.txt`
+set templ_coord_z_mm = `$AWK '/''/ {print $6}' temp_coord.txt`
+rm -f temp_coord.txt
+
+#Calculate the corner coordinate for the volume in the center of subject FOV in pixels
+set corner_x = `$AWK '/''/ {print $1}' temp_corners.txt`
+set corner_y = `$AWK '/''/ {print $2}' temp_corners.txt`
+set corner_z = `$AWK '/''/ {print $3}' temp_corners.txt`
+set templ_corner_x = `$AWK '/''/ {print $4}' temp_corners.txt`
+set templ_corner_y = `$AWK '/''/ {print $5}' temp_corners.txt`
+set templ_corner_z = `$AWK '/''/ {print $6}' temp_corners.txt`
+rm -f temp_corners.txt
+
+
+set corner_x  = `printf "%s\n" 'scale = 3; ( '${corner_x}') ' | ${new_bc}`
+set corner_y  = `printf "%s\n" 'scale = 3; ( '${corner_y}') ' | ${new_bc}`
+set corner_z  = `printf "%s\n" 'scale = 3; ( '${corner_z}') ' | ${new_bc}`
+set templ_corner_x  = `printf "%s\n" 'scale = 3; ( '${templ_corner_x}') ' | ${new_bc}`
+set templ_corner_y  = `printf "%s\n" 'scale = 3; ( '${templ_corner_y}') ' | ${new_bc}`
+set templ_corner_z  = `printf "%s\n" 'scale = 3; ( '${templ_corner_z}') ' | ${new_bc}`
+
+
+
+echo ""
+echo ""
+echo "Calculated voxel rotation (GetEulerAngles.m) in subject space (T>C, T>S, Rot):  ${rot_x_calc} ; ${rot_y_calc} ; ${rot_z_calc}"
+echo "Voxel center coordinate in subject space (mm):  $coord_x_mm ; $coord_y_mm ; $coord_z_mm "
+echo ""
+	
+
+
+#Rotate and angulate the volume - output a 4x4 matrix
+makerot -t ${rot_x_calc} -a 1,0,0 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_x.mat
+
+makerot -t ${rot_y_calc} -a 0,1,0 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_y.mat
+
+makerot -t ${rot_z_calc} -a 0,0,1 -c ${center_fov_x},${center_fov_y},${center_fov_z} -o makerot_z.mat
+
+#Concat matrices
+convert_xfm -omat rot_yz.mat -concat makerot_y.mat makerot_z.mat
+
+convert_xfm -omat rot_xyz.mat -concat makerot_x.mat rot_yz.mat
+
+rm -f makerot_x.mat
+rm -f makerot_y.mat
+rm -f makerot_z.mat
+rm -f rot_yz.mat
+ 
+echo "Recreating voxel in subject space..."
+
+#Create volume in center of FOV of template
+fslmaths $t1_file -roi $corner_x $size_x_px $corner_y $size_y_px $corner_z $size_z_px 0 1 ${subj_name}_${voxel_name}_${mri_orient}_ref_voi.nii.gz
+
+#Divide the final volume by itself - thus each pixel should have an intensity value = 1 or 0
+
+fslmaths ${subj_name}_${voxel_name}_${mri_orient}_ref_voi.nii.gz -div ${subj_name}_${voxel_name}_${mri_orient}_ref_voi.nii.gz ${subj_name}_${voxel_name}_${mri_orient}_voi.nii.gz 
+
+
+echo "Flirting voxel to subject space (this may take a minute)..."
+
+#Apply rotation matrix to created volume in center of FOV of template
+
+flirt -dof 6 -ref ${t1_file} -in ${subj_name}_${voxel_name}_${mri_orient}_voi.nii.gz -out ${subj_name}_${voxel_name}_${mri_orient}_rotated.nii.gz -applyxfm -init rot_xyz.mat 
+rm -f ${subj_name}_${voxel_name}_${mri_orient}_ref_voi.nii.gz
+rm -f ${subj_name}_${voxel_name}_${mri_orient}_voi.nii.gz 
+rm -f rot_xyz.mat
+
+#Apply translation matrix to rotated volume - move to final position
+
+flirt -dof 9 -ref ${t1_file} -in ${subj_name}_${voxel_name}_${mri_orient}_rotated.nii.gz -out ${subj_name}_${voxel_name}_${mri_orient}_subj_space.nii.gz -applyxfm -init voi_2_ref.mat 
+
+mri_convert ${subj_name}_${voxel_name}_${mri_orient}_subj_space.nii.gz ${subj_name}_${voxel_name}_${mri_orient}_subj_space_hires.nii.gz -vs 0.5 0.5 0.5
+
+rm -f voi_2_ref.mat 
+rm -f ${subj_name}_${voxel_name}_${mri_orient}_rotated.nii.gz
+
+
+##BET (remove skull from the subject T1)
+
+bet ${t1_file} t1_${subj_name}_${mri_orient}_bet.nii.gz -R -f 0.4
+
+##FAST to calculate tissue segmentation
+
+fast -f 0.4 -I 5 -B -o t1_${subj_name}_${mri_orient}_bet.nii.gz 
+
+set mean_0 = `fslstats  t1_${subj_name}_${mri_orient}_bet_pve_0.nii.gz  -V | cut -d\  -f1`
+set mean_1 = `fslstats  t1_${subj_name}_${mri_orient}_bet_pve_1.nii.gz  -V | cut -d\  -f1`
+set mean_2 = `fslstats  t1_${subj_name}_${mri_orient}_bet_pve_2.nii.gz  -V | cut -d\  -f1`
+
+if ( $mean_2 > $mean_1 && $mean_2 > $mean_0 && $mean_1 > $mean_0 )   then
+	set pve_0 = "csf"
+	set pve_1 = "wm"
+	set pve_2 = "gm"
+else if ( $mean_1 > $mean_2 && $mean_1 > $mean_0 && $mean_2 > $mean_0 )   then
+	set pve_0 = "csf"
+	set pve_1 = "gm"
+	set pve_2 = "wm"
+else if ( $mean_1 > $mean_0 && $mean_1 > $mean_2 && $mean_0 > $mean_2 )   then
+	set pve_0 = "wm"
+	set pve_1 = "gm"
+	set pve_2 = "csf"
+else if ( $mean_0 > $mean_1 && $mean_0 > $mean_2 && $mean_1 > $mean_2 )   then
+	set pve_0 = "gm"
+	set pve_1 = "wm"
+	set pve_2 = "csf"
+else if ( $mean_0 > $mean_2 && $mean_0 > $mean_1 && $mean_2 > $mean_1 )   then
+	set pve_0 = "gm"
+	set pve_1 = "csf"
+	set pve_2 = "wm"
+else if ( $mean_2 > $mean_0 && $mean_2 > $mean_1 && $mean_0 > $mean_1 )   then
+	set pve_0 = "wm"
+	set pve_1 = "csf"
+	set pve_2 = "gm"
+endif
+
+
+mv -f t1_${subj_name}_${mri_orient}_bet_pve_0.nii.gz  t1_${subj_name}_${mri_orient}_${pve_0}.nii.gz
+mv -f t1_${subj_name}_${mri_orient}_bet_pve_1.nii.gz  t1_${subj_name}_${mri_orient}_${pve_1}.nii.gz
+mv -f t1_${subj_name}_${mri_orient}_bet_pve_2.nii.gz  t1_${subj_name}_${mri_orient}_${pve_2}.nii.gz
+
+rm -f t1_${subj_name}_${mri_orient}_bet_*.nii.gz
+		
+mv ${rda_dir}/${subj_name}_${voxel_name}_${mri_orient}_subj_space_hires.nii.gz ${image_dir}
+mv ${rda_dir}/${subj_name}_${voxel_name}_${mri_orient}_subj_space.nii.gz ${image_dir}
+mv ${rda_dir}/t1_${subj_name}_${mri_orient}_*.nii.gz ${image_dir}
+
+
+#Name the voxel placement in template space
+set subj_name = `echo $rda_file | cut -c1-7`
+set time_point = `echo $rda_file | cut -c8`
+
+
+echo ""
+echo ""
+echo "Calculated voxel rotation (GetEulerAngles.m) in template space (T>C, T>S, Rot):  ${rot_x_calc_templ} ; ${rot_y_calc_templ} ; ${rot_z_calc_templ}"
+echo "Voxel center coordinate in template space (mm):  $templ_vox_ctr_mm_x ; $templ_vox_ctr_mm_y ; $templ_vox_ctr_mm_z "
+echo ""
+
+echo "Recreating voxel in template space..."
+	
+#Build the voxel in center of template space
+
+fslmaths ${template_file} -roi $templ_corner_x $size_x_px $templ_corner_y $size_y_px $templ_corner_z $size_z_px 0 1 ${subj_name}_${voxel_name}_${mri_orient}_ref_templ_voi.nii.gz
+
+fslmaths ${subj_name}_${voxel_name}_${mri_orient}_ref_templ_voi.nii.gz -div ${subj_name}_${voxel_name}_${mri_orient}_ref_templ_voi.nii.gz ${subj_name}_${voxel_name}_${mri_orient}_ref_templ.nii.gz 
+
+###Convert the orthogonal template voxel to 0.5mm isotropic and move to the overlap directory
+
+if ( ! -e "${image_dir}/voxel_size_hires.nii.gz" ) then
+
+	mri_convert ${subj_name}_${voxel_name}_${mri_orient}_ref_templ.nii.gz voxel_size_hires.nii.gz -vs 0.5 0.5 0.5
+	
+	mv voxel_size_hires.nii.gz ${image_dir}
+	
+else
+endif
+
+
+#Rotate and angulate the volume - output a 4x4 matrix
+makerot -t ${rot_x_calc_templ} -a 1,0,0 -c ${templ_center_fov_x},${templ_center_fov_y},${templ_center_fov_z} -o makerot_x.mat
+
+makerot -t ${rot_y_calc_templ} -a 0,1,0 -c ${templ_center_fov_x},${templ_center_fov_y},${templ_center_fov_z} -o makerot_y.mat
+
+makerot -t ${rot_z_calc_templ} -a 0,0,1 -c ${templ_center_fov_x},${templ_center_fov_y},${templ_center_fov_z} -o makerot_z.mat
+
+#Concat matrices
+convert_xfm -omat rot_yz.mat -concat makerot_y.mat makerot_z.mat
+
+convert_xfm -omat rot_xyz.mat -concat makerot_x.mat rot_yz.mat
+	
+rm -f makerot_x.mat
+rm -f makerot_y.mat
+rm -f makerot_z.mat
+rm -f rot_yz.mat
+
+#Flirt volume from template to subject space (dof = 6)
+
+flirt -dof 6 -in ${subj_name}_${voxel_name}_${mri_orient}_ref_templ.nii.gz -ref ${template_file} -out ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_rotated.nii.gz -applyxfm -init rot_xyz.mat
+
+flirt -dof 9 -ref ${template_file} -in ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_rotated.nii.gz -out ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_lowres.nii.gz -applyxfm -init voi_2_templ.mat 
+
+mri_convert ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_lowres.nii.gz  ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}.nii.gz -vs 0.5 0.5 0.5
+
+mv ${rda_dir}/${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}.nii.gz ${image_dir}
+
+#housekeeping
+rm -f voi_2_templ.mat 
+rm -f rot_xyz.mat
+rm -f ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_rotated.nii.gz
+rm -f ${subj_name}_${voxel_name}_${mri_orient}_ref_templ_voi.nii.gz
+rm -f ${subj_name}_${voxel_name}_${mri_orient}_ref_templ.nii.gz 
+rm -f ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}_lowres.nii.gz
+
+
+
+###END of RDA file foreach loop
+end
+
+else
+endif
+
+
+echo "Image files created successfully... moving on"
+
+
+
+
+###Convert template voxel to 0.5mm isotropic and move to the overlap directory
+if ( ! -e "${image_dir}/${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz" ) then
+	
+	mri_convert ${testing_dir}/${voxel_name}_${study_name}_${mri_orient}_final.nii.gz ${testing_dir}/${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -vs 0.5 0.5 0.5
+	mv ${testing_dir}/${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz ${image_dir}
+	
+else
+endif
+
+###Convert template brain image to 0.5mm isotropic and move to the overlap directory
+if ( ! -e "${image_dir}/${study_name}_${mri_orient}_template_hires.nii.gz" ) then
+	
+	mri_convert ${testing_dir}/${study_name}_${mri_orient}_template.nii.gz ${testing_dir}/${study_name}_${mri_orient}_template_hires.nii.gz -vs 0.5 0.5 0.5
+	mv ${testing_dir}/${study_name}_${mri_orient}_template_hires.nii.gz ${image_dir}
+
+else
+endif
+
+
+#housekeeping
+
+rm -f ${image_dir}/${study_name}*_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz
+rm -f ${image_dir}/${study_name}*_${voxel_name}_${mri_orient}_within_overlap.nii.gz
+rm -f ${overlap_dir}/${study_name}*_${voxel_name}_${mri_orient}_within_overlap.nii.gz
+rm -f ${image_dir}/*_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz
+rm -f ${image_dir}/*_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz
+rm -f ${overlap_dir}/*_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz
+rm -f ${overlap_dir}/${study_name}_*_overlap.txt
+rm -f ${overlap_dir}/*_${study_name}_overlap.txt
+rm -f ${overlap_dir}/${study_name}_overlap_summary.txt
+rm -f ${overlap_dir}/${study_name}*_within_overlap.txt
+rm -f ${image_dir}/${study_name}_*_overlap.txt
+rm -f ${image_dir}/*_${study_name}_overlap.txt
+rm -f ${image_dir}/${study_name}_overlap_summary.txt
+rm -f ${image_dir}/${study_name}*_within_overlap.txt
+
+
+
+
+####Change into the overlap directory - now contains all of the voxels recreated from the RDA file info for each subject and timepoint
+echo ""
+echo "Step 2: Calculate voxel coregistration accuracy and between subject overlap"
+echo ""
+
+
+cd ${image_dir}
+
+	set ideal_volume_size  = `fslstats voxel_size_hires.nii.gz -l 0.99 -V |  $AWK '{print $1}'`
+	set ideal_volume_size = `printf "%s\n" 'scale = 4; (  ('${ideal_volume_size}' ) )'  | ${new_bc}`
+
+	set template_55  = `fslstats ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -l 0.55 -V |  $AWK '{print $1}'`
+	set template_55 = `printf "%s\n" 'scale = 3; (  ('${template_55}' ) )'  | ${new_bc}`
+	set template_65  = `fslstats ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -l 0.65 -V |  $AWK '{print $1}'`
+	set template_65 = `printf "%s\n" 'scale = 3; (  ('${template_65}' ) )'  | ${new_bc}`
+	set template_75  = `fslstats ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -l 0.75 -V |  $AWK '{print $1}'`
+	set template_75 = `printf "%s\n" 'scale = 3; (  ('${template_75}' ) )'  | ${new_bc}`
+	set template_85  = `fslstats ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -l 0.85 -V |  $AWK '{print $1}'`
+	set template_85 = `printf "%s\n" 'scale = 3; (  ('${template_85}' ) )'  | ${new_bc}`
+	set template_95  = `fslstats ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz -l 0.95 -V |  $AWK '{print $1}'`
+	set template_95 = `printf "%s\n" 'scale = 3; (  ('${template_95}' ) )'  | ${new_bc}`
+
+###For each time point, this will create an overlap file of all subjects with scans at that time point
+
+
+	foreach subj ( `ls ${study_name}*_${mri_orient}_*2ref_${voxel_name}.nii.gz` )
+		set subj_numb = `echo $subj | cut -c4-7`
+		set time_point = `echo $subj | cut -c13`
+		set subj_name = `echo $subj | cut -c1-7`
+		
+		set btwn_count = 0
+		
+			foreach timept ( `ls ${study_name}*_${mri_orient}_${time_point}2ref_${voxel_name}.nii.gz` )
+				set btwn_count = `printf "%s\n" 'scale = 1; ( '$btwn_count'  + 1 ) ' | ${new_bc}`
+				set subj_numb = `echo $timept | cut -c4-7`
+				set time_point = `echo $timept | cut -c13`
+				set subj_name = `echo $timept | cut -c1-7`
+				
+				set gm_vol  = `fslstats t1_${subj_name}${time_point}_${mri_orient}_gm.nii.gz -k ${subj_name}${time_point}_${voxel_name}_${mri_orient}_subj_space.nii.gz -V | $AWK '{print $1}'`
+				set gm_vol = `printf "%s\n" 'scale = 3; (  ('${gm_vol}' ) )'  | ${new_bc}`
+				set wm_vol  = `fslstats t1_${subj_name}${time_point}_${mri_orient}_wm.nii.gz -k ${subj_name}${time_point}_${voxel_name}_${mri_orient}_subj_space.nii.gz -V | $AWK '{print $1}'`
+				set wm_vol = `printf "%s\n" 'scale = 3; (  ('${wm_vol}' ) )'  | ${new_bc}`
+				set csf_vol = `fslstats t1_${subj_name}${time_point}_${mri_orient}_csf.nii.gz -k ${subj_name}${time_point}_${voxel_name}_${mri_orient}_subj_space.nii.gz -V | $AWK '{print $1}'`
+				set csf_vol = `printf "%s\n" 'scale = 3; (  ('${csf_vol}' ) )'  | ${new_bc}`
+				set total_vol = `printf "%s\n" 'scale = 3; (  ('${csf_vol}' + '${gm_vol}' + '${wm_vol}' ) )'  | ${new_bc}`
+				
+				set gm_per = `printf "%s\n" 'scale = 3; (  ( '${gm_vol}' / '${total_vol}' ) * 100 )'  | ${new_bc}`
+				set wm_per = `printf "%s\n" 'scale = 3; (  ( '${wm_vol}' / '${total_vol}' ) * 100 )'  | ${new_bc}`
+				set csf_per = `printf "%s\n" 'scale = 3; (  ( '${csf_vol}' / '${total_vol}' ) * 100 )'  | ${new_bc}`
+										
+				
+				###Calculate overlap with the template voxel - accuracy
+					fslmaths ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}.nii.gz -add ${voxel_name}_${study_name}_${mri_orient}_hires.nii.gz ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz
+					echo "Calculating accuracy for... ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz"
+					set templ_55  = `fslstats ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz -l 1.1 -V |  $AWK '{print $1}'`
+					set templ_55 = `printf "%s\n" 'scale = 3; (  ('${templ_55}' ) )'  | ${new_bc}`
+					set templ_65  = `fslstats ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz -l 1.3 -V |  $AWK '{print $1}'`
+					set templ_65 = `printf "%s\n" 'scale = 3; (  ('${templ_65}' ) )'  | ${new_bc}`
+					set templ_75  = `fslstats ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz -l 1.5 -V |  $AWK '{print $1}'`
+					set templ_75 = `printf "%s\n" 'scale = 3; (  ('${templ_75}' ) )'  | ${new_bc}`
+					set templ_85  = `fslstats ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz -l 1.7 -V |  $AWK '{print $1}'`
+					set templ_85 = `printf "%s\n" 'scale = 3; (  ('${templ_85}' ) )'  | ${new_bc}`
+					set templ_95  = `fslstats ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz -l 1.9 -V |  $AWK '{print $1}'`
+					set templ_95 = `printf "%s\n" 'scale = 3; (  ('${templ_95}' ) )'  | ${new_bc}`
+					rm -f ${subj_name}_${mri_orient}_${time_point}2templ_${voxel_name}.nii.gz
+		
+					
+					set overtempl_55 = `printf "%s\n" 'scale = 3; (  ( '${templ_55}' / '${template_55}' ) * 100 )'  | ${new_bc}`
+					set overtempl_65 = `printf "%s\n" 'scale = 3; (  ( '${templ_65}' / '${template_65}' ) * 100 )'  | ${new_bc}`
+					set overtempl_75 = `printf "%s\n" 'scale = 3; (  ( '${templ_75}' / '${template_75}' ) * 100 )'  | ${new_bc}`
+					set overtempl_85 = `printf "%s\n" 'scale = 3; (  ( '${templ_85}' / '${template_85}' ) * 100 )'  | ${new_bc}`
+					set overtempl_95 = `printf "%s\n" 'scale = 3; (  ( '${templ_95}' / '${template_95}' ) * 100 )'  | ${new_bc}`
+
+					
+				
+				if ( ! -e ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz ) then
+					echo "Added ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz to ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz"
+					cp $timept ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz
+					mv $timept ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz
+					echo "Between_Count_#	Subject_ID	Time_Point Volume_55 Volume_65 Volume_75 Volume_85 Volume_95 Accuracy_%_55 Accuracy_%_65 Accuracy_%_75 Accuracy_%_85 Accuracy_%_95 %_Voxel_GM %_Voxel_WM %_Voxel_CSF" > ${study_name}_${time_point}_overlap.txt
+					set btwn_55  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.55 -V |  $AWK '{print $1}'` 
+					set btwn_55 = `printf "%s\n" 'scale = 3; (  ('${btwn_55}' ) )'  | ${new_bc}`
+					set btwn_65  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.65 -V |  $AWK '{print $1}'`
+					set btwn_65 = `printf "%s\n" 'scale = 3; (  ('${btwn_65}' ) )'  | ${new_bc}`
+					set btwn_75  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.75 -V |  $AWK '{print $1}'`
+					set btwn_75 = `printf "%s\n" 'scale = 3; (  ('${btwn_75}' ) )'  | ${new_bc}`
+					set btwn_85  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.85 -V |  $AWK '{print $1}'`
+					set btwn_85 = `printf "%s\n" 'scale = 3; (  ('${btwn_85}' ) )'  | ${new_bc}`
+					set btwn_95  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.95 -V |  $AWK '{print $1}'`
+					set btwn_95 = `printf "%s\n" 'scale = 3; (  ('${btwn_95}' ) )'  | ${new_bc}`
+					echo "$btwn_count	$subj_name	$time_point $btwn_55 $btwn_65 $btwn_75 $btwn_85 $btwn_95 $overtempl_55 $overtempl_65 $overtempl_75 $overtempl_85 $overtempl_95 $gm_per $wm_per $csf_per" >> ${study_name}_${time_point}_overlap.txt
+					echo "$overtempl_55 $overtempl_65 $overtempl_75 $overtempl_85 $overtempl_95 $gm_per $wm_per $csf_per" >> ${study_name}_${time_point}_percent.txt
+				else
+				endif
+			
+			if ( -e $timept ) then
+				fslmaths ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz -add $timept ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz
+				mv $timept ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz
+				echo "Added ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz to ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz"
+					set btwn_55  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.55 -V |  $AWK '{print $1}'` 
+					set btwn_55 = `printf "%s\n" 'scale = 3; (  ('${btwn_55}' ) )'  | ${new_bc}`
+					set btwn_65  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.65 -V |  $AWK '{print $1}'`
+					set btwn_65 = `printf "%s\n" 'scale = 3; (  ('${btwn_65}' ) )'  | ${new_bc}`
+					set btwn_75  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.75 -V |  $AWK '{print $1}'`
+					set btwn_75 = `printf "%s\n" 'scale = 3; (  ('${btwn_75}' ) )'  | ${new_bc}`
+					set btwn_85  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.85 -V |  $AWK '{print $1}'`
+					set btwn_85 = `printf "%s\n" 'scale = 3; (  ('${btwn_85}' ) )'  | ${new_bc}`
+					set btwn_95  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added.nii.gz -l 0.95 -V |  $AWK '{print $1}'`
+					set btwn_95 = `printf "%s\n" 'scale = 3; (  ('${btwn_95}' ) )'  | ${new_bc}`
+					echo "$btwn_count	$subj_name	$time_point $btwn_55 $btwn_65 $btwn_75 $btwn_85 $btwn_95 $overtempl_55 $overtempl_65 $overtempl_75 $overtempl_85 $overtempl_95 $gm_per $wm_per $csf_per" >> ${study_name}_${time_point}_overlap.txt
+					echo "$overtempl_55 $overtempl_65 $overtempl_75 $overtempl_85 $overtempl_95 $gm_per $wm_per $csf_per" >> ${study_name}_${time_point}_percent.txt
+			else
+			endif
+			
+			echo "$btwn_count" >> btwn_count.txt
+		end
+			cp ${time_point}_${study_name}_${voxel_name}_${mri_orient}_start_overlap.nii.gz ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz
+			
+	end
+
+
+	echo "Calculating between subject overlap..."
+		
+### Create overlap summary document for all of the between subject overlap at each time point
+
+	if ( ! -e ${study_name}_overlap_summary.txt ) then
+			echo "Overlap_Summary_Statistics" > ${study_name}_overlap_summary.txt
+	else
+	endif
+
+
+##Append overlap summary doc with between subject overlap
+
+	foreach timept ( `ls ${study_name}_*_overlap.txt` )
+		set time_point = `echo $timept | cut -c5`
+			
+			more ${study_name}_${time_point}_overlap.txt > temp3.txt
+			set counts = `$AWK '/''/ {print $1}' temp3.txt`
+			set counts = `echo $counts | cut -d' ' -f 2-`
+			set subjects = `$AWK '/''/ {print $2}' temp3.txt`
+			set subjects = `echo $subjects | cut -d' ' -f 2-`
+			set btwn_55 = `$AWK '/''/ {print $4}' temp3.txt`
+			set btwn55 = `echo $btwn_55 | cut -d' ' -f 2-`
+			set btwn_65 = `$AWK '/''/ {print $5}' temp3.txt`
+			set btwn65 = `echo $btwn_65 | cut -d' ' -f 2-`
+			set btwn_75 = `$AWK '/''/ {print $6}' temp3.txt`
+			set btwn75 = `echo $btwn_75 | cut -d' ' -f 2-`
+			set btwn_85 = `$AWK '/''/ {print $7}' temp3.txt`
+			set btwn85 = `echo $btwn_85 | cut -d' ' -f 2-`
+			set btwn_95 = `$AWK '/''/ {print $8}' temp3.txt`
+			set btwn95 = `echo $btwn_95 | cut -d' ' -f 2-`
+			rm -f temp3.txt
+			
+			mv ${study_name}_${time_point}_overlap.txt ${time_point}_${study_name}_overlap.txt 		
+					
+matlab -nodesktop -nodisplay -nojvm << EOF
+count = max([ $counts ]);
+thresh55 = (count * 0.55);
+thresh65 = (count * 0.65);
+thresh75 = (count * 0.75);
+thresh85 = (count * 0.85);
+thresh95 = (count * 0.95);
+data =  round2dp([ thresh55 thresh65 thresh75 thresh85 thresh95 count ],3);
+dlmwrite('temp_thresh.txt',data,'delimiter','\t','precision',6)
+EOF
+
+
+			#Threshold values
+			set thresh_55 = `$AWK '/''/ {print $1}' temp_thresh.txt`
+			set thresh_65 = `$AWK '/''/ {print $2}' temp_thresh.txt`
+			set thresh_75 = `$AWK '/''/ {print $3}' temp_thresh.txt`
+			set thresh_85 = `$AWK '/''/ {print $4}' temp_thresh.txt`
+			set thresh_95 = `$AWK '/''/ {print $5}' temp_thresh.txt`
+			set count = `$AWK '/''/ {print $6}' temp_thresh.txt`
+			rm -f temp_thresh.txt
+			
+			set thresh55  = `printf "%s\n" 'scale = 3; ( '${thresh_55}') ' | ${new_bc}`
+			set thresh65  = `printf "%s\n" 'scale = 3; ( '${thresh_65}') ' | ${new_bc}`
+			set thresh75  = `printf "%s\n" 'scale = 3; ( '${thresh_75}') ' | ${new_bc}`
+			set thresh85  = `printf "%s\n" 'scale = 3; ( '${thresh_85}') ' | ${new_bc}`
+			set thresh95  = `printf "%s\n" 'scale = 3; ( '${thresh_95}') ' | ${new_bc}`
+			set count = `printf "%s\n" 'scale = 3; ( '${count}' ) ' | ${new_bc}`
+			
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+command55 = 'fslstats  ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz -l $thresh55 -V';
+command65 = 'fslstats  ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz -l $thresh65 -V';
+command75 = 'fslstats  ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz -l $thresh75 -V';
+command85 = 'fslstats  ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz -l $thresh85 -V';
+command95 = 'fslstats  ${time_point}_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz -l $thresh95 -V';
+[status,cmdout55] = system(command55);
+[status,cmdout65] = system(command65);
+[status,cmdout75] = system(command75);
+[status,cmdout85] = system(command85);
+[status,cmdout95] = system(command95);
+vol55 = str2num(cmdout55);
+vol65 = str2num(cmdout65);
+vol75 = str2num(cmdout75);
+vol85 = str2num(cmdout85);
+vol95 = str2num(cmdout95);
+m55 = mean( [ ${btwn55} ] );
+m65 = mean( [ ${btwn65} ] );
+m75 = mean( [ ${btwn75} ] );
+m85 = mean( [ ${btwn85} ] );
+m95 = mean( [ ${btwn95} ] );
+sd55 = std( [ ${btwn55} ] );
+sd65 = std( [ ${btwn65} ] );
+sd75 = std( [ ${btwn75} ] );
+sd85 = std( [ ${btwn85} ] );
+sd95 = std( [ ${btwn95} ] );
+over55 = round2dp(( vol55(1) / m55 ),3);
+over65 = round2dp(( vol65(1) / m65 ),3);
+over75 = round2dp(( vol75(1) / m75 ),3);
+over85 = round2dp(( vol85(1) / m85 ),3);
+over95 = round2dp(( vol95(1) / m95 ),3);
+perc55 = round2dp(( m55 / $ideal_volume_size ), 3);
+perc65 = round2dp(( m65 / $ideal_volume_size ), 3);
+perc75 = round2dp(( m75 / $ideal_volume_size ), 3);
+perc85 = round2dp(( m85 / $ideal_volume_size ), 3);
+perc95 = round2dp(( m95 / $ideal_volume_size ), 3);
+stdev55 = ( sd55 / m55 );
+stdev65 = ( sd65 / m65 );
+stdev75 = ( sd75 / m75 );
+stdev85 = ( sd85 / m85 );
+stdev95 = ( sd95 / m95 );
+overlap55 = round2dp((over55 * 100),3);
+overlap65 = round2dp((over65 * 100),3);
+overlap75 = round2dp((over75 * 100),3);
+overlap85 = round2dp((over85 * 100),3);
+overlap95 = round2dp((over95 * 100),3);
+percent55 = round2dp((perc55 * 100),3);
+percent65 = round2dp((perc65 * 100),3);
+percent75 = round2dp((perc75 * 100),3);
+percent85 = round2dp((perc85 * 100),3);
+percent95 = round2dp((perc95 * 100),3);
+perdev55 = round2dp((stdev55 * 100),3);
+perdev65 = round2dp((stdev65 * 100),3);
+perdev75 = round2dp((stdev75 * 100),3);
+perdev85 = round2dp((stdev85 * 100),3);
+perdev95 = round2dp((stdev95 * 100),3);
+data = [ overlap55 overlap65 overlap75 overlap85 overlap95 perdev55 perdev65 perdev75 perdev85 perdev95 percent55 percent65 percent75 percent85 percent95 ];
+dlmwrite('temp_over.txt',data,'delimiter','\t','precision',6);
+EOF
+
+			
+			set overlap_55 = `$AWK '/''/ {print $1}' temp_over.txt`
+			set overlap_65 = `$AWK '/''/ {print $2}' temp_over.txt`
+			set overlap_75 = `$AWK '/''/ {print $3}' temp_over.txt`
+			set overlap_85 = `$AWK '/''/ {print $4}' temp_over.txt`
+			set overlap_95 = `$AWK '/''/ {print $5}' temp_over.txt`
+			set perdev_55 = `$AWK '/''/ {print $6}' temp_over.txt`
+			set perdev_65 = `$AWK '/''/ {print $7}' temp_over.txt`
+			set perdev_75 = `$AWK '/''/ {print $8}' temp_over.txt`
+			set perdev_85 = `$AWK '/''/ {print $9}' temp_over.txt`
+			set perdev_95 = `$AWK '/''/ {print $10}' temp_over.txt`
+			set percent_55 = `$AWK '/''/ {print $11}' temp_over.txt`
+			set percent_65 = `$AWK '/''/ {print $12}' temp_over.txt`
+			set percent_75 = `$AWK '/''/ {print $13}' temp_over.txt`
+			set percent_85 = `$AWK '/''/ {print $14}' temp_over.txt`
+			set percent_95 = `$AWK '/''/ {print $15}' temp_over.txt`
+			rm -f temp_over.txt
+			
+			
+			set overlap_55 = `printf "%s\n" 'scale = 4; ( '$overlap_55' ) ' | ${new_bc}` 				 
+			set overlap_65 = `printf "%s\n" 'scale = 4; ( '$overlap_65' ) ' | ${new_bc}` 				 
+			set overlap_75 = `printf "%s\n" 'scale = 4; ( '$overlap_75' ) ' | ${new_bc}` 				 
+			set overlap_85 = `printf "%s\n" 'scale = 4; ( '$overlap_85' ) ' | ${new_bc}` 				 
+ 			set overlap_95 = `printf "%s\n" 'scale = 4; ( '$overlap_95' ) ' | ${new_bc}`
+			set perdev_55 = `printf "%s\n" 'scale = 4; ( '$perdev_55' ) ' | ${new_bc}` 				 
+			set perdev_65 = `printf "%s\n" 'scale = 4; ( '$perdev_65' ) ' | ${new_bc}` 				 
+			set perdev_75 = `printf "%s\n" 'scale = 4; ( '$perdev_75' ) ' | ${new_bc}` 				 
+			set perdev_85 = `printf "%s\n" 'scale = 4; ( '$perdev_85' ) ' | ${new_bc}` 				 
+			set perdev_95 = `printf "%s\n" 'scale = 4; ( '$perdev_95' ) ' | ${new_bc}` 
+			set percent_55 = `printf "%s\n" 'scale = 4; ( '$percent_55' ) ' | ${new_bc}` 				 
+			set percent_65 = `printf "%s\n" 'scale = 4; ( '$percent_65' ) ' | ${new_bc}` 				 
+			set percent_75 = `printf "%s\n" 'scale = 4; ( '$percent_75' ) ' | ${new_bc}` 				 
+			set percent_85 = `printf "%s\n" 'scale = 4; ( '$percent_85' ) ' | ${new_bc}` 				 
+			set percent_95 = `printf "%s\n" 'scale = 4; ( '$percent_95' ) ' | ${new_bc}`	
+				
+			echo "Procedure_Date:  $proc_date" >> ${study_name}_overlap_summary.txt
+			echo "Subjects_TimePoint_${time_point}: $subjects" >> ${study_name}_overlap_summary.txt
+			echo "Total_#_Subjects_${time_point}:  $count" >> ${study_name}_overlap_summary.txt
+			echo "Between_Overlap_55_${time_point}: $overlap_55"  >> ${study_name}_overlap_summary.txt
+			echo "Between_Overlap_65_${time_point}: $overlap_65"  >> ${study_name}_overlap_summary.txt
+			echo "Between_Overlap_75_${time_point}: $overlap_75"  >> ${study_name}_overlap_summary.txt
+			echo "Between_Overlap_85_${time_point}: $overlap_85"  >> ${study_name}_overlap_summary.txt
+			echo "Between_Overlap_95_${time_point}: $overlap_95"  >> ${study_name}_overlap_summary.txt
+			echo "Percent_Total_Voxel_55_${time_point}: $percent_55"  >> ${study_name}_overlap_summary.txt
+			echo "Percent_Total_Voxel_65_${time_point}: $percent_65"  >> ${study_name}_overlap_summary.txt
+			echo "Percent_Total_Voxel_75_${time_point}: $percent_75"  >> ${study_name}_overlap_summary.txt
+			echo "Percent_Total_Voxel_85_${time_point}: $percent_85"  >> ${study_name}_overlap_summary.txt
+			echo "Percent_Total_Voxel_95_${time_point}: $percent_95"  >> ${study_name}_overlap_summary.txt			
+			#echo "Coeff_Variation_%_55_${time_point}: $perdev_55"  >> ${study_name}_overlap_summary.txt
+			#echo "Coeff_Variation_%_65_${time_point}: $perdev_65"  >> ${study_name}_overlap_summary.txt
+			#echo "Coeff_Variation_%_75_${time_point}: $perdev_75"  >> ${study_name}_overlap_summary.txt
+			#echo "Coeff_Variation_%_85_${time_point}: $perdev_85"  >> ${study_name}_overlap_summary.txt
+			#echo "Coeff_Variation_%_95_${time_point}: $perdev_95"  >> ${study_name}_overlap_summary.txt	
+			
+			
+		endif
+		
+	end
+	
+
+
+	
+foreach timept ( `ls *_${study_name}_overlap.txt` )
+	set time_point = `echo $timept | cut -c1`
+
+set perc_55 = `$AWK '/''/ {print $1}' ${study_name}_${time_point}_percent.txt`
+set perc_65 = `$AWK '/''/ {print $2}' ${study_name}_${time_point}_percent.txt`
+set perc_75 = `$AWK '/''/ {print $3}' ${study_name}_${time_point}_percent.txt`
+set perc_85 = `$AWK '/''/ {print $4}' ${study_name}_${time_point}_percent.txt`
+set perc_95 = `$AWK '/''/ {print $5}' ${study_name}_${time_point}_percent.txt`
+set gm = `$AWK '/''/ {print $6}' ${study_name}_${time_point}_percent.txt`
+set wm = `$AWK '/''/ {print $7}' ${study_name}_${time_point}_percent.txt`
+set csf = `$AWK '/''/ {print $8}' ${study_name}_${time_point}_percent.txt`
+
+
+rm -f ${study_name}_${time_point}_percent.txt
+
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+per55 = mean( [ $perc_55 ]);
+per65 = mean( [ $perc_65 ]);
+per75 = mean( [ $perc_75 ]);
+per85 = mean( [ $perc_85 ]);
+per95 = mean( [ $perc_95 ]);
+gm_vol = mean( [ $gm ]);
+wm_vol = mean( [ $wm ]);
+csf_vol = mean( [ $csf ]);
+percent55 = round2dp(per55,2);
+percent65 = round2dp(per65,2);
+percent75 = round2dp(per75,2);
+percent85 = round2dp(per85,2);
+percent95 = round2dp(per95,2);
+gm_per = round2dp(gm_vol,2);
+wm_per = round2dp(wm_vol,2);
+csf_per = round2dp(csf_vol,2);
+data = [ percent55 percent65 percent75 percent85 percent95 gm_per wm_per csf_per ];
+dlmwrite('percent_overlap.txt',data,'delimiter','\t','precision',6);
+EOF
+
+
+set percent_55 = `$AWK '/''/ {print $1}' percent_overlap.txt`
+set percent_65 = `$AWK '/''/ {print $2}' percent_overlap.txt`
+set percent_75 = `$AWK '/''/ {print $3}' percent_overlap.txt`
+set percent_85 = `$AWK '/''/ {print $4}' percent_overlap.txt`
+set percent_95 = `$AWK '/''/ {print $5}' percent_overlap.txt`
+set gm_perc = `$AWK '/''/ {print $6}' percent_overlap.txt`
+set wm_perc = `$AWK '/''/ {print $7}' percent_overlap.txt`
+set csf_perc = `$AWK '/''/ {print $8}' percent_overlap.txt`
+rm -f percent_overlap.txt
+
+echo "Mean_Accuracy_55_${time_point}: $percent_55"  >> ${study_name}_overlap_summary.txt
+echo "Mean_Accuracy_65_${time_point}: $percent_65"  >> ${study_name}_overlap_summary.txt
+echo "Mean_Accuracy_75_${time_point}: $percent_75"  >> ${study_name}_overlap_summary.txt
+echo "Mean_Accuracy_85_${time_point}: $percent_85"  >> ${study_name}_overlap_summary.txt
+echo "Mean_Accuracy_95_${time_point}: $percent_95"  >> ${study_name}_overlap_summary.txt
+echo "Mean_GM_%_${time_point}: $gm_perc"  >> ${study_name}_overlap_summary.txt
+echo "Mean_WM_%_${time_point}: $wm_perc"  >> ${study_name}_overlap_summary.txt
+echo "Mean_CSF_%_${time_point}: $csf_perc"  >> ${study_name}_overlap_summary.txt
+
+
+end
+
+	
+	
+	echo ""
+	echo "Accuracy and between subject overlap results written..."
+	echo ""
+	echo "Step 3:  Calculate within subject overlap..."
+	echo ""
+	
+###This will create an overlap file for all within subject (multiple timepoints; longitudinal studies)
+
+
+	foreach subj ( `ls ${study_name}*_${voxel_name}_${mri_orient}_added.nii.gz` )
+		set subj_numb = `echo $subj | cut -c4-7`
+		set time_point = `echo $subj | cut -c8`
+		set subj_name = `echo $subj | cut -c1-7`
+		
+		set within_count = 0
+		
+		if ( "${time_point}" == "b" || "${time_point}" == "c" || "${time_point}" == "d" || "${time_point}" == "e" || "${time_point}" == "f"  ) then
+								
+			foreach subj2 ( `ls ${subj_name}*_${voxel_name}_${mri_orient}_added.nii.gz` )
+					set subj_numb = `echo $subj2 | cut -c4-7`
+					set time_point = `echo $subj2 | cut -c8`
+					set subj_name = `echo $subj2 | cut -c1-7`
+						
+					set within_count = `printf "%s\n" 'scale = 1; ( '$within_count'  + 1 ) ' | ${new_bc}`
+					echo "### Subject being processed:  $subj_name"
+					
+					if ( ! -e ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz ) then
+						cp $subj2 ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz
+						mv $subj2 ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz
+						echo "Added ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz to ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz"
+						echo "Within_Count_#	Subject_ID	Time_Point Volume_55 Volume_65 Volume_75 Volume_85 Volume_95" > ${subj_name}_overlap_within.txt
+						set within_55  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.55 -V |  $AWK '{print $1}'` 
+						set within_55 = `printf "%s\n" 'scale = 3; (  ('${within_55}' ) )'  | ${new_bc}`
+						set within_65  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.65 -V |  $AWK '{print $1}'`
+						set within_65 = `printf "%s\n" 'scale = 3; (  ('${within_65}' ) )'  | ${new_bc}`
+						set within_75  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.75 -V |  $AWK '{print $1}'`
+						set within_75 = `printf "%s\n" 'scale = 3; (  ('${within_75}' ) )'  | ${new_bc}`
+						set within_85  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.85 -V |  $AWK '{print $1}'`
+						set within_85 = `printf "%s\n" 'scale = 3; (  ('${within_85}' ) )'  | ${new_bc}`
+						set within_95  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.95 -V |  $AWK '{print $1}'`
+						set within_95 = `printf "%s\n" 'scale = 3; (  ('${within_95}' ) )'  | ${new_bc}`
+						echo "$within_count	$subj_name	$time_point $within_55 $within_65 $within_75 $within_85 $within_95" >> ${subj_name}_overlap_within.txt
+					else
+					endif
+				
+				if ( -e $subj2 ) then	
+					fslmaths ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz -add $subj2 ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz
+					mv $subj2 ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz
+					echo "Added ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz to ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz"
+					set within_55  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.55 -V |  $AWK '{print $1}'` 
+					set within_55 = `printf "%s\n" 'scale = 3; (  ('${within_55}' ) )'  | ${new_bc}`
+					set within_65  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.65 -V |  $AWK '{print $1}'`
+					set within_65 = `printf "%s\n" 'scale = 3; (  ('${within_65}' ) )'  | ${new_bc}`
+					set within_75  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.75 -V |  $AWK '{print $1}'`
+					set within_75 = `printf "%s\n" 'scale = 3; (  ('${within_75}' ) )'  | ${new_bc}`
+					set within_85  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.85 -V |  $AWK '{print $1}'`
+					set within_85 = `printf "%s\n" 'scale = 3; (  ('${within_85}' ) )'  | ${new_bc}`
+					set within_95  = `fslstats ${subj_name}${time_point}_${voxel_name}_${mri_orient}_added2.nii.gz -l 0.95 -V |  $AWK '{print $1}'`
+					set within_95 = `printf "%s\n" 'scale = 3; (  ('${within_95}' ) )'  | ${new_bc}`
+					echo "$within_count	$subj_name	$time_point $within_55 $within_65 $within_75 $within_85 $within_95" >> ${subj_name}_overlap_within.txt
+				else
+				endif
+				
+			end
+		
+			cp ${subj_name}_${voxel_name}_${mri_orient}_start_within_overlap.nii.gz ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz
+		else
+		endif
+
+		
+	end
+
+
+	
+###Add within subject findings to overlap summary doc
+
+foreach subject ( `ls ${study_name}*_overlap_within.txt` )
+	set subj_name = `echo $subject | cut -c1-7`
+	
+			more ${subj_name}_overlap_within.txt > temp3.txt
+	
+			set counts = `$AWK '/''/ {print $1}' temp3.txt`
+			set counts = `echo $counts | cut -d' ' -f 2-`
+			set subjects = `$AWK '/''/ {print $2}' temp3.txt`
+			set subjects = `echo $subjects | cut -d' ' -f 2-`
+			set btwn_55 = `$AWK '/''/ {print $4}' temp3.txt`
+			set btwn55 = `echo $btwn_55 | cut -d' ' -f 2-`
+			set btwn_65 = `$AWK '/''/ {print $5}' temp3.txt`
+			set btwn65 = `echo $btwn_65 | cut -d' ' -f 2-`
+			set btwn_75 = `$AWK '/''/ {print $6}' temp3.txt`
+			set btwn75 = `echo $btwn_75 | cut -d' ' -f 2-`
+			set btwn_85 = `$AWK '/''/ {print $7}' temp3.txt`
+			set btwn85 = `echo $btwn_85 | cut -d' ' -f 2-`
+			set btwn_95 = `$AWK '/''/ {print $8}' temp3.txt`
+			set btwn95 = `echo $btwn_95 | cut -d' ' -f 2-`
+			rm -f temp3.txt
+			
+			mv ${subj_name}_overlap_within.txt ${subj_name}_within_overlap.txt 		
+					
+matlab -nodesktop -nodisplay -nojvm << EOF
+count = max([ $counts ]);
+thresh55 = (count * 0.55);
+thresh65 = (count * 0.65);
+thresh75 = (count * 0.75);
+thresh85 = (count * 0.85);
+thresh95 = (count * 0.95);
+data =  round2dp([ thresh55 thresh65 thresh75 thresh85 thresh95 count ],2);
+dlmwrite('temp_thresh.txt',data,'delimiter','\t','precision',6);
+EOF
+
+
+
+			#Threshold values
+			set thresh_55 = `$AWK '/''/ {print $1}' temp_thresh.txt`
+			set thresh_65 = `$AWK '/''/ {print $2}' temp_thresh.txt`
+			set thresh_75 = `$AWK '/''/ {print $3}' temp_thresh.txt`
+			set thresh_85 = `$AWK '/''/ {print $4}' temp_thresh.txt`
+			set thresh_95 = `$AWK '/''/ {print $5}' temp_thresh.txt`
+			set count = `$AWK '/''/ {print $6}' temp_thresh.txt`
+			rm -f temp_thresh.txt
+			
+			set thresh55  = `printf "%s\n" 'scale = 3; ( '${thresh_55}') ' | ${new_bc}`
+			set thresh65  = `printf "%s\n" 'scale = 3; ( '${thresh_65}') ' | ${new_bc}`
+			set thresh75  = `printf "%s\n" 'scale = 3; ( '${thresh_75}') ' | ${new_bc}`
+			set thresh85  = `printf "%s\n" 'scale = 3; ( '${thresh_85}') ' | ${new_bc}`
+			set thresh95  = `printf "%s\n" 'scale = 3; ( '${thresh_95}') ' | ${new_bc}`
+			set count = `printf "%s\n" 'scale = 4; ( '$count' ) ' | ${new_bc}`
+			
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+command55 = 'fslstats  ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz -l $thresh55 -V';
+command65 = 'fslstats  ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz -l $thresh65 -V';
+command75 = 'fslstats  ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz -l $thresh75 -V';
+command85 = 'fslstats  ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz -l $thresh85 -V';
+command95 = 'fslstats  ${subj_name}_${voxel_name}_${mri_orient}_within_overlap.nii.gz -l $thresh95 -V';
+[status,cmdout55] = system(command55);
+[status,cmdout65] = system(command65);
+[status,cmdout75] = system(command75);
+[status,cmdout85] = system(command85);
+[status,cmdout95] = system(command95);
+vol55 = str2num(cmdout55);
+vol65 = str2num(cmdout65);
+vol75 = str2num(cmdout75);
+vol85 = str2num(cmdout85);
+vol95 = str2num(cmdout95);
+m55 = mean( [ $btwn55 ] );
+m65 = mean( [ $btwn65 ] );
+m75 = mean( [ $btwn75 ] );
+m85 = mean( [ $btwn85 ] );
+m95 = mean( [ $btwn95 ] );
+sd55 = std( [ $btwn55 ] );
+sd65 = std( [ $btwn65 ] );
+sd75 = std( [ $btwn75 ] );
+sd85 = std( [ $btwn85 ] );
+sd95 = std( [ $btwn95 ] );
+stdev55 = (sd55 / m55 );
+stdev65 = (sd65 / m65 );
+stdev75 = (sd75 / m75 );
+stdev85 = (sd85 / m85 );
+stdev95 = (sd95 / m95 );
+over55 = round2dp((vol55(1) / m55 ),3);
+over65 = round2dp((vol65(1) / m65 ),3);
+over75 = round2dp((vol75(1) / m75 ),3);
+over85 = round2dp((vol85(1) / m85 ),3);
+over95 = round2dp((vol95(1) / m95 ),3);
+overlap55 = round2dp((over55 * 100),3);
+overlap65 = round2dp((over65 * 100),3);
+overlap75 = round2dp((over75 * 100),3);
+overlap85 = round2dp((over85 * 100),3);
+overlap95 = round2dp((over95 * 100),3);
+perdev55 = round2dp((stdev55 * 100),3);
+perdev65 = round2dp((stdev65 * 100),3);
+perdev75 = round2dp((stdev75 * 100),3);
+perdev85 = round2dp((stdev85 * 100),3);
+perdev95 = round2dp((stdev95 * 100),3);
+data = [ overlap55 overlap65 overlap75 overlap85 overlap95 perdev55 perdev65 perdev75 perdev85 perdev95 ];
+dlmwrite('temp_over.txt',data,'delimiter','\t','precision',8);
+if ( $count > 1 )
+counted = 'y';
+else;
+counted = 'n';
+end;
+dlmwrite('temp_count.txt',counted);
+EOF
+
+
+			
+	set overlap_55 = `$AWK '/''/ {print $1}' temp_over.txt`
+	set overlap_65 = `$AWK '/''/ {print $2}' temp_over.txt`
+	set overlap_75 = `$AWK '/''/ {print $3}' temp_over.txt`
+	set overlap_85 = `$AWK '/''/ {print $4}' temp_over.txt`
+	set overlap_95 = `$AWK '/''/ {print $5}' temp_over.txt`
+	set overlap_55  = `printf "%s\n" 'scale = 4; ( '${overlap_55}') ' | ${new_bc}`
+	set overlap_65  = `printf "%s\n" 'scale = 4; ( '${overlap_65}') ' | ${new_bc}`
+	set overlap_75  = `printf "%s\n" 'scale = 4; ( '${overlap_75}') ' | ${new_bc}`
+	set overlap_85  = `printf "%s\n" 'scale = 4; ( '${overlap_85}') ' | ${new_bc}`
+	set overlap_95  = `printf "%s\n" 'scale = 4; ( '${overlap_95}') ' | ${new_bc}`
+	set perdev_55 = `$AWK '/''/ {print $6}' temp_over.txt`
+	set perdev_65 = `$AWK '/''/ {print $7}' temp_over.txt`
+	set perdev_75 = `$AWK '/''/ {print $8}' temp_over.txt`
+	set perdev_85 = `$AWK '/''/ {print $9}' temp_over.txt`
+	set perdev_95 = `$AWK '/''/ {print $10}' temp_over.txt`
+	set counted = `$AWK '/''/ {print $1}' temp_count.txt`
+	rm -f temp_over.txt
+	rm -f temp_count.txt
+
+ 
+if ( "${counted}" == "y" ) then
+	echo "Procedure_Date:  $proc_date" >> ${study_name}_within_overlap.txt	
+	echo "Total_#_TimePoints_${subj_name}: $count" >> ${study_name}_within_overlap.txt	
+	echo "Within_Overlap_55_${subj_name}: $overlap_55"  >> ${study_name}_within_overlap.txt	
+	echo "Within_Overlap_65_${subj_name}: $overlap_65"  >> ${study_name}_within_overlap.txt	
+	echo "Within_Overlap_75_${subj_name}: $overlap_75"  >> ${study_name}_within_overlap.txt	
+	echo "Within_Overlap_85_${subj_name}: $overlap_85"  >> ${study_name}_within_overlap.txt	
+	echo "Within_Overlap_95_${subj_name}: $overlap_95"  >> ${study_name}_within_overlap.txt	
+	echo "Coeff_Variation_%_55_${subj_name}: $perdev_55"  >> ${study_name}_within_overlap.txt	
+	echo "Coeff_Variation_%_65_${subj_name}: $perdev_65"  >> ${study_name}_within_overlap.txt	
+	echo "Coeff_Variation_%_75_${subj_name}: $perdev_75"  >> ${study_name}_within_overlap.txt	
+	echo "Coeff_Variation_%_85_${subj_name}: $perdev_85"  >> ${study_name}_within_overlap.txt	
+	echo "Coeff_Variation_%_95_${subj_name}: $perdev_95"  >> ${study_name}_within_overlap.txt
+else
+endif
+
+
+end
+
+
+
+
+##If there exists more than one subject who completed 2 or more scans, sample within subject overlap will be calculated
+
+
+set counting = `$AWK '/''/ {print $1}' btwn_count.txt`
+rm -f btwn_count.txt
+
+
+
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+counted = max( [ $counting ] );
+if ( counted > 1 )
+count = 'y';
+else;
+count = 'n';
+end;
+dlmwrite('temp_counted.txt',count);
+EOF
+
+
+
+
+set count = `$AWK '/''/ {print $1}' temp_counted.txt`
+
+
+rm -f temp_counted.txt
+
+if ( "$count" == "y" ) then
+
+grep 'Within_Overlap_55' ${study_name}_within_overlap.txt > temp_55.txt
+grep 'Within_Overlap_65' ${study_name}_within_overlap.txt > temp_65.txt
+grep 'Within_Overlap_75' ${study_name}_within_overlap.txt > temp_75.txt
+grep 'Within_Overlap_85' ${study_name}_within_overlap.txt > temp_85.txt
+grep 'Within_Overlap_95' ${study_name}_within_overlap.txt > temp_95.txt
+
+set values55 = `$AWK '/'Within_'/ {print $2}' temp_55.txt`
+set values65 = `$AWK '/'Within_'/ {print $2}' temp_65.txt`
+set values75 = `$AWK '/'Within_'/ {print $2}' temp_75.txt`
+set values85 = `$AWK '/'Within_'/ {print $2}' temp_85.txt`
+set values95 = `$AWK '/'Within_'/ {print $2}' temp_95.txt`
+rm -f temp_55.txt
+rm -f temp_65.txt
+rm -f temp_75.txt
+rm -f temp_85.txt
+rm -f temp_95.txt
+
+
+
+
+
+
+matlab -nodesktop -nodisplay -nojvm << EOF
+m55 = round2dp(mean([ $values55 ]),2);
+m65 = round2dp(mean([ $values65 ]),2);
+m75 = round2dp(mean([ $values75 ]),2);
+m85 = round2dp(mean([ $values85 ]),2);
+m95 = round2dp(mean([ $values95 ]),2);
+data = ([ m55 m65 m75 m85 m95 ]);
+dlmwrite('temp_means.txt',data,'delimiter','\t','precision',6);
+EOF
+
+
+set mean_55 = `$AWK '/''/ {print $1}' temp_means.txt`
+set mean_65 = `$AWK '/''/ {print $2}' temp_means.txt`
+set mean_75 = `$AWK '/''/ {print $3}' temp_means.txt`
+set mean_85 = `$AWK '/''/ {print $4}' temp_means.txt`
+set mean_95 = `$AWK '/''/ {print $5}' temp_means.txt`
+rm -f temp_means.txt
+
+
+
+echo "Overall_Within_Overlap_55: $mean_55"  >> ${study_name}_overlap_summary.txt
+echo "Overall_Within_Overlap_65: $mean_65"  >> ${study_name}_overlap_summary.txt
+echo "Overall_Within_Overlap_75: $mean_75"  >> ${study_name}_overlap_summary.txt	
+echo "Overall_Within_Overlap_85: $mean_85"  >> ${study_name}_overlap_summary.txt	
+echo "Overall_Within_Overlap_95: $mean_95"  >> ${study_name}_overlap_summary.txt
+	
+else
+endif
+
+
+
+foreach subj ( `ls ${study_name}*_${voxel_name}_${mri_orient}_add*.nii.gz` )
+	set subj_numb = `echo $subj | cut -c4-7`
+	set time_point = `echo $subj | cut -c8`
+	set subj_name = `echo $subj | cut -c1-7`
+
+	mv ${subj} ${subj_name}_${mri_orient}_${time_point}2ref_${voxel_name}.nii.gz
+	
+end
+
+
+mv *_${study_name}_${voxel_name}_${mri_orient}_overlap.nii.gz ${overlap_dir}
+mv ${study_name}*_${voxel_name}_${mri_orient}_within_overlap.nii.gz ${overlap_dir}
+
+mv ${image_dir}/*txt ${overlap_dir}
+
+
+echo ""
+echo ""
+echo "##############################################################################################"
+echo "###"
+echo "###  Overlap percentage successfully calculated for the ${study_name} study."
+echo "###"
+echo "###  Subject/Template image files:  ${image_dir}"
+echo "###  Overlap image files:  ${overlap_dir}"
+echo "###"
+echo "###  Overlap results can be found here:"
+echo "###  Within_Subject:  ${overlap_dir}/${study_name}_within_overlap.txt"
+echo "###  Between_Subject:  ${overlap_dir}/[TimePoint]_${study_name}_overlap.txt"
+echo "###"
+echo "###  Overlap summary:  ${overlap_dir}/${study_name}_overlap_summary.txt"
+echo "###"
+echo "###  Please cite:"
+echo "###"
+echo "###  Woodcock EA, Arshad M, Khatib D, & Stanley JA (2018). Automated Voxel Placement:" 
+echo "###  A Linux-based Suite of Tools for Accurate and Reliable Single Voxel Coregistration. JNPN."
+echo "###"
+echo "##############################################################################################"
+
+exit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

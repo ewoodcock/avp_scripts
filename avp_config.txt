@@ -1,0 +1,14 @@
+## AVP Config document
+
+## Author:  Eric Woodcock
+
+## Instructions - Enter the location of the following folders
+## 1) Location of the Study Folders ['study_dir']
+## 2) Location of the RDA Files ['rda_dir']
+## 3) Location of Matlab (linux version) scripts ['matlab_dir']
+## 4) Location of 'new_bc' script ['new_bc']
+
+study_dir: /home/dicom/gdrive/studies 
+rda_dir: /home/dicom/gdrive/studies/NSS/rda_files  
+matlab_dir: /home/dicom/gdrive/scripts 
+new_bc: /home/dicom/gdrive/testing/new_bc 
